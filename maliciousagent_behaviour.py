@@ -160,8 +160,8 @@ class MaliciousAgentsBehaviour:
             and -1 is disagreement
         """
         # Check if target has been selected and opinion about target's behaviour is asked
-        if self.targets[np.where(self.attack_decisions==1)] != [] and\
-            opinion[0] == self.targets[np.where(self.attack_decisions==1)[0][0]]:
+        indices = np.where(self.attack_decisions==1)[0]
+        if indices.size > 0 and opinion[0] == self.targets[indices[0]]:
                 if opinion[1] == 1: # If positive opinion about target is asked
                     feedback = -1 # Disagree with target's positive behaviour
                 else:
