@@ -33,6 +33,26 @@ from experiment import experiment
 from setup_values import timestep, nTimesteps, nExperiments, nProviders, nAgents, nMalAgents, W, save_fig, output_dir,\
     alpha, delta, epsilon, eta, theta, kappa, Lambda, lambda_, xi,\
     rho, tau, Upsilon, upsilon_, experiment_id
+
+# ── EARLY SANITY-CHECKS ──────────────────────────────────────────────────
+# 1) make sure the CSV directory exists *and* is writable before the
+#    expensive simulation starts. Bail fast if not.
+OUTPUT_DATA_DIR = os.path.join(os.getcwd(), "output_data")
+try:
+    os.makedirs(OUTPUT_DATA_DIR, exist_ok=True)
+    testfile = os.path.join(OUTPUT_DATA_DIR, ".write_test")
+    with open(testfile, "w") as _f:
+        _f.write("")             # quick write test
+    os.remove(testfile)
+except OSError as err:
+    raise SystemExit(f"❌  Cannot create/write to '{OUTPUT_DATA_DIR}': {err}")
+
+# 2) if you’re saving figures, ensure that folder is ready too
+if 'save_fig' in globals() and save_fig:
+    os.makedirs(output_dir, exist_ok=True)
+# ──────────────────────────────────────────────────────────────────────────
+
+
 run = 1
 
 for i in range(run):
@@ -152,8 +172,9 @@ for i in range(run):
     tick.stop()
 
     # Write data locally
-    output_dir_data = os.path.join(os.getcwd(), "output_data")
-    with open(output_dir_data+str(f'/experiment{experiment_id}_df.csv'), 'a', encoding='UTF8', newline='') as f:
+    with open(os.path.join(OUTPUT_DATA_DIR,
+                           f"experiment{experiment_id}_df.csv"),
+              "a", encoding="UTF8", newline="") as f:
         data_df.to_csv(f, header=False)
 
     # Visualise data
