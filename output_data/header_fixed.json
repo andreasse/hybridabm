@@ -1,0 +1,46 @@
+{
+  "meta": {
+    "generated": "2025-06-04T13:56:09+00:00",
+    "nAgents": 1000,
+    "nTimesteps": 10000
+  },
+  "summary_csv": "experiment3_summary.csv",
+  "frames_gzip": "frames_exp3_20250604_134457.jsonl.gz",
+  "events": [
+    {
+      "t": 2892,
+      "type": "CYBER"
+    },
+    {
+      "t": 2893,
+      "type": "COMBO"
+    },
+    {
+      "t": 2912,
+      "type": "MISINFO"
+    }
+  ]
+}
+{
+  "meta": {
+    "generated": "2025-06-04T16:12:22+00:00",
+    "nAgents": 1000,
+    "nTimesteps": 10000
+  },
+  "summary_csv": "experiment3_summary.csv",
+  "frames_gzip": "frames_exp3_20250604_141543.jsonl.gz",
+  "events": [
+    {
+      "t": 2967,
+      "type": "CYBER"
+    },
+    {
+      "t": 2968,
+      "type": "COMBO"
+    },
+    {
+      "t": 2980,
+      "type": "MISINFO"
+    }
+  ]
+}

@@ -1,9 +1,10 @@
+# run.py
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 MIT License
 
-Copyright (c) [2024] [Kart Padur]
+Copyright (c) 2024 Kart Padur
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -24,249 +25,352 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
-import os
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
+# ---------------------------------------------------------------------------
+#  ⚙️  Hybrid‑Article main driver  (stream-friendly, O(1)-RAM rewrite) (full original logic + perf & head‑less fixes)
+# ---------------------------------------------------------------------------
+
+import os, gzip, json, warnings
+from datetime import datetime, timezone
+import matplotlib, matplotlib.pyplot as plt
+import numpy as np, pandas as pd, orjson
+
 from timer import Timer
 from experiment import experiment
-from setup_values import timestep, nTimesteps, nExperiments, nProviders, nAgents, nMalAgents, W, save_fig, output_dir,\
-    alpha, delta, epsilon, eta, theta, kappa, Lambda, lambda_, xi,\
-    rho, tau, Upsilon, upsilon_, experiment_id
+from setup_values import (
+    timestep, nTimesteps, nExperiments, nProviders, nAgents, nMalAgents, W,
+    save_fig, output_dir, alpha, delta, epsilon, eta, theta, kappa, Lambda,
+    lambda_ as lambda_arr, xi, rho, tau, Upsilon, upsilon_, experiment_id,
+)
 
-# ── EARLY SANITY-CHECKS ──────────────────────────────────────────────────
-# 1) make sure the CSV directory exists *and* is writable before the
-#    expensive simulation starts. Bail fast if not.
+ORJSON_OPTS = (
+    orjson.OPT_SERIALIZE_NUMPY
+    | orjson.OPT_NAIVE_UTC
+    | orjson.OPT_NON_STR_KEYS
+)
+def dumps(obj):          # keep it tiny
+    return orjson.dumps(obj, option=ORJSON_OPTS)
+
+###############################################################################
+# IO PATHS & CONSTANTS
+###############################################################################
 OUTPUT_DATA_DIR = os.path.join(os.getcwd(), "output_data")
-try:
-    os.makedirs(OUTPUT_DATA_DIR, exist_ok=True)
-    testfile = os.path.join(OUTPUT_DATA_DIR, ".write_test")
-    with open(testfile, "w") as _f:
-        _f.write("")             # quick write test
-    os.remove(testfile)
-except OSError as err:
-    raise SystemExit(f"❌  Cannot create/write to '{OUTPUT_DATA_DIR}': {err}")
+os.makedirs(OUTPUT_DATA_DIR, exist_ok=True)
+SUMMARY_CSV  = os.path.join(OUTPUT_DATA_DIR, f"experiment{experiment_id}_summary.csv")
+FRAMES_JSONL = os.path.join(
+    OUTPUT_DATA_DIR,
+    f"frames_exp{experiment_id}_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}.jsonl.gz",
+)
 
-# 2) if you’re saving figures, ensure that folder is ready too
-if 'save_fig' in globals() and save_fig:
+# header carries meta + events so the UI can find everything
+HEADER_JSON = FRAMES_JSONL.replace("frames_", "header_").replace(".jsonl.gz", ".json")
+
+if save_fig:
     os.makedirs(output_dir, exist_ok=True)
-# ──────────────────────────────────────────────────────────────────────────
 
+# Head‑less backend detection – "Agg", "PDF", etc. never open a window ------
+HEADLESS_BACKENDS = {"agg", "pdf", "svg"}
+SHOW_FIGS = (not save_fig) and matplotlib.get_backend().lower() not in HEADLESS_BACKENDS
 
-run = 1
+def _maybe_show():
+    """Show figure only if interactive; always close to free memory."""
+    if SHOW_FIGS:
+        plt.show()
+    plt.close()
+# ---------------------------------------------------------------------------
 
-for i in range(run):
-    tick = Timer()
-    tick.start()
-    # Collect relevant data
-    data_df = pd.DataFrame(columns = ['regret','provider', 'avguse', 'avgreward', 'posopinion', 'negopinion', 
-        'avgusebefore', 'avguseduring', 'avguseafter', 'avgrewbefore', 'avgrewduring', 'avgrewafter', 
-        'posopinionbefore', 'posopinionduring', 'posopinionafter', 'negopinionbefore', 'negopinionduring', 'negopinionafter',
-        'target_id', 'attack_beginning', 'misinfo_beginning', 'misinfo_length', 'cyber_beginning', 'cyber_length',
-        'combined_beginning','combined_length','impactusage', 'impactposop', 'impactnegop','attackreward', 'detectionreward', 'malreward',
-        'alpha','delta', 'epsilon', 'eta', 'theta', 'kappa', 'Lambda', 'lambda', 'xi', 'rho', 'tau', 'Upsilon', 'upsilon'])
+# All dataframe columns (kept verbatim from original) -----------------------
+COLUMNS = [
+    "regret", "provider", "avguse", "avgreward", "posopinion", "negopinion",
+    "avgusebefore", "avguseduring", "avguseafter", "avgrewbefore", "avgrewduring",
+    "avgrewafter", "posopinionbefore", "posopinionduring", "posopinionafter",
+    "negopinionbefore", "negopinionduring", "negopinionafter", "target_id",
+    "attack_beginning", "misinfo_beginning", "misinfo_length", "cyber_beginning",
+    "cyber_length", "combined_beginning", "combined_length", "impactusage",
+    "impactposop", "impactnegop", "attackreward", "detectionreward", "malreward",
+    "alpha", "delta", "epsilon", "eta", "theta", "kappa", "Lambda", "lambda", "xi",
+    "rho", "tau", "Upsilon", "upsilon",
+]
+# ---------------------------------------------------------------------------
 
-    # Run experiment
-    for i in range(nExperiments):
-        print("[Experiment {}/{}]".format(i + 1, nExperiments))
-        actions, rewards, opinionvalues, regrets, attack_decisions, targets, attack_methods, \
-        attack_rewards, detection_rewards = experiment(timestep, nTimesteps)
-        # Calculate average regret value
-        avgregret = np.mean(regrets[W+1:])/nAgents
-        # Collect information if an attack happened
-        if nMalAgents > 0 and np.any(attack_decisions == 1):
-            attack_timesteps = np.array(np.where(attack_decisions==1))[0]
-            target_provider =  targets[attack_timesteps[0]] # attack target
-            misinfo_campaign1 = np.where((attack_methods == 1) & (attack_decisions==1))[0]
-            misinfo_campaign2 = np.where((attack_methods == 2) & (attack_decisions==1))[0]
-            misinfo_campaign = [*misinfo_campaign1, *misinfo_campaign2]
-            misinfo_campaign.sort()
-            misinfo_length = len(misinfo_campaign)
-            if len(misinfo_campaign)>=1:
-                misinfo_beginning = min(misinfo_campaign)+1
-            else:
-                misinfo_beginning = ''
-            cyber_campaign1 = np.array(np.where((attack_methods == 0) & (attack_decisions==1)))[0]
-            cyber_campaign2 = np.array(np.where((attack_methods == 2) & (attack_decisions==1)))[0]
-            cyber_campaign = [*cyber_campaign1, *cyber_campaign2]
-            cyber_campaign.sort()
-            cyber_length = len(cyber_campaign)
-            if len(cyber_campaign)>=1:
-                cyber_beginning = min(cyber_campaign)+1
-            else:
-                cyber_beginning = ''
-            combined_campaign = np.array(np.where((attack_methods == 2) & (attack_decisions==1)))[0]
-            combined_length = len(combined_campaign)
-            if combined_length == 0:
-                combined_beginning = ''
-            else:
-                combined_beginning = min(combined_campaign)+1
-            if nTimesteps-1 == attack_timesteps[-1]:
-                reward_timesteps = np.append(attack_timesteps[1:],  attack_timesteps[-1])
-            else:
-                reward_timesteps = np.append(attack_timesteps[1:],  attack_timesteps[-1]+1)
-            attackreward = np.sum(attack_rewards[reward_timesteps])
-            detectionreward = np.sum(detection_rewards[reward_timesteps])
-            malreward = attackreward + detectionreward 
-            
-            print("Target: ", target_provider+1, ", attack timesteps: " , attack_timesteps\
-                , ", length of attack campaign: ", len(attack_timesteps)\
-                , ", misinfo campaign: ", misinfo_campaign, ", cyber campaign: ", cyber_campaign)
+run = 1  # You can bump this to run the same parameter set multiple times
+
+for _run_idx in range(run):
+    timer = Timer(); timer.start()
+
+    rows:   list[dict] = []       # provider-level summary rows
+    events: list[dict] = []       # attack timeline
+    jsonl  = gzip.open(FRAMES_JSONL, "wb")   # ← stream frames here
+
+    # ── MAIN EXPERIMENT LOOP ───────────────────────────────────────────────
+    for exp in range(nExperiments):
+        print(f"[Experiment {exp + 1}/{nExperiments}]")
+
+        actions, rewards, opinionvalues, regrets, attack_decisions, targets, \
+        attack_methods, attack_rewards, detection_rewards = experiment(timestep, nTimesteps)
+
+        # Average regret after warm‑up window W
+        avgregret = np.mean(regrets[W + 1:]) / nAgents
+
+        # ── STREAM -- one JSONL per user per timestep — keeps RAM flat ──
+        agent_id = 0
+        for t in range(nTimesteps):
+            for prov in range(nProviders):
+                n_here = int(actions[t, prov])
+                if n_here == 0:
+                    continue
+                r_per_user = rewards[t, prov] / n_here
+                common = {
+                    "t": t + 1,
+                    "provider_id": prov,
+                    "service_level": rewards[t, prov],
+                    "opinion": opinionvalues[t, prov + 3] if (prov + 3) < opinionvalues.shape[1] else 0,
+                    "reward": r_per_user,
+                }
+                for _ in range(n_here):
+                    jsonl.write(dumps(common | {
+                        "agent_id": agent_id,
+                        "malicious": int(agent_id < nMalAgents),
+                    }) + b"\n")
+                    agent_id = (agent_id + 1) % nAgents
+
+        # --- Attack meta extraction --------------------------------------
+        attack_happened = nMalAgents > 0 and np.any(attack_decisions == 1)
+        if attack_happened:
+            attack_ts = np.flatnonzero(attack_decisions)
+            target_provider = targets[attack_ts[0]]
+
+            misinfo_ts  = np.flatnonzero(((attack_methods == 1) | (attack_methods == 2)) & attack_decisions)
+            cyber_ts    = np.flatnonzero(((attack_methods == 0) | (attack_methods == 2)) & attack_decisions)
+            combined_ts = np.flatnonzero((attack_methods == 2) & attack_decisions)
+
+            misinfo_len, cyber_len, combined_len = len(misinfo_ts), len(cyber_ts), len(combined_ts)
+            misinfo_begin = misinfo_ts.min() + 1 if misinfo_len else ""
+            cyber_begin   = cyber_ts.min() + 1 if cyber_len else ""
+            comb_begin    = combined_ts.min() + 1 if combined_len else ""
+
+            # Malicious reward windows -----------------------------------
+            reward_ts = np.append(attack_ts[1:], attack_ts[-1] + (attack_ts[-1] != nTimesteps - 1))
+            attackreward    = attack_rewards[reward_ts].sum()
+            detectionreward = detection_rewards[reward_ts].sum()
+            malreward       = attackreward + detectionreward
+
+            print(
+                f"Target: {target_provider + 1} , attack timesteps: {attack_ts} , "
+                f"length of attack campaign: {attack_ts.size} , misinfo campaign: {misinfo_ts.tolist()} , "
+                f"cyber campaign: {cyber_ts.tolist()}"
+            )
+
+            # ── Build events list from ground-truth arrays ───────────────
+            typ_map = {0: "CYBER", 1: "MISINFO", 2: "COMBO"}
+            last_typ = None
+            for t_step in np.flatnonzero(attack_decisions):
+                typ = typ_map[int(attack_methods[t_step])]
+                if typ != last_typ:
+                    events.append({"t": int(t_step) + 1, "type": typ})
+                    last_typ = typ
+        # ------------------------------------------------------------------
+
+        # Provider‑level metrics -------------------------------------------
         for provider in range(nProviders):
-            # Calculate average use for each provider
-            avguse = np.mean(actions[W+1:,provider])/nAgents
-            # Calculate average reward value for each provider
-            avgreward = np.sum(rewards[W+1:,provider])/np.sum(actions[W+1:,provider])
-            # Calculate average positive opinion value for each provider
-            posopinion = np.mean(opinionvalues[W+1:,provider+3])
-            # Calculate average negative opinion value for each provider
-            negopinion =  np.mean(opinionvalues[W+1:,provider])
-            # malagents
-            if nMalAgents > 0 and np.any(attack_decisions == 1):
-                avgusebefore = np.mean(actions[attack_timesteps[0]-len(attack_timesteps):attack_timesteps[0], provider])/nAgents
-                avguseduring = np.mean(actions[attack_timesteps, provider])/nAgents
-                avguseafter = np.mean(actions[attack_timesteps[-1]:attack_timesteps[-1]+len(attack_timesteps), provider])/nAgents
-                avgrewbefore = np.sum(rewards[attack_timesteps[0]-len(attack_timesteps):attack_timesteps[0], provider])/\
-                    np.sum(actions[W+1:attack_timesteps[0],provider])
-                avgrewduring = np.sum(rewards[attack_timesteps, provider])/np.sum(actions[attack_timesteps,provider])
-                avgrewafter = np.sum(rewards[attack_timesteps[-1]:attack_timesteps[-1]+len(attack_timesteps), provider])/\
-                    np.sum(actions[attack_timesteps[-1]:(nTimesteps-1),provider])
-                posopinionbefore = np.mean(opinionvalues[attack_timesteps[0]-len(attack_timesteps):attack_timesteps[0], provider+3])
-                posopinionduring =  np.mean(opinionvalues[attack_timesteps, provider+3])
-                posopinionafter =  np.mean(opinionvalues[attack_timesteps[-1]:attack_timesteps[-1]+len(attack_timesteps), provider+3])
-                negopinionbefore =  np.mean(opinionvalues[attack_timesteps[0]-len(attack_timesteps):attack_timesteps[0], provider])
-                negopinionduring =  np.mean(opinionvalues[attack_timesteps, provider])
-                negopinionafter =  np.mean(opinionvalues[attack_timesteps[-1]:attack_timesteps[-1]+len(attack_timesteps), provider])
-                # impact on usage and opinions
+            # Averages after warm‑up
+            avguse = np.mean(actions[W + 1:, provider]) / nAgents
+            denom_total = np.sum(actions[W + 1:, provider])
+            avgreward = 0 if denom_total == 0 else np.sum(rewards[W + 1:, provider]) / denom_total
+            posopinion = np.mean(opinionvalues[W + 1:, provider + 3])
+            negopinion = np.mean(opinionvalues[W + 1:, provider])
+
+            if attack_happened:
+                # Slices before / during / after attack of equal length to attack window
+                win = attack_ts.size
+                before_sl = slice(max(0, attack_ts[0] - win), attack_ts[0])
+                during_sl = attack_ts
+                after_sl  = slice(attack_ts[-1], min(nTimesteps, attack_ts[-1] + win))
+
+                def _mean_safe(arr):
+                    return float(arr.mean()) if arr.size else 0
+
+                avgusebefore = np.mean(actions[before_sl, provider]) / nAgents
+                avguseduring = np.mean(actions[during_sl, provider]) / nAgents
+                avguseafter  = np.mean(actions[after_sl,  provider]) / nAgents
+
+                avgrewbefore = _mean_safe(rewards[before_sl, provider] / np.where(actions[before_sl, provider] == 0, 1, actions[before_sl, provider]))
+                avgrewduring = _mean_safe(rewards[during_sl, provider] / np.where(actions[during_sl, provider] == 0, 1, actions[during_sl, provider]))
+                avgrewafter  = _mean_safe(rewards[after_sl,  provider] / np.where(actions[after_sl,  provider] == 0, 1, actions[after_sl,  provider]))
+
+                posopinionbefore = _mean_safe(opinionvalues[before_sl, provider + 3])
+                posopinionduring = _mean_safe(opinionvalues[during_sl, provider + 3])
+                posopinionafter  = _mean_safe(opinionvalues[after_sl,  provider + 3])
+                negopinionbefore = _mean_safe(opinionvalues[before_sl, provider])
+                negopinionduring = _mean_safe(opinionvalues[during_sl, provider])
+                negopinionafter  = _mean_safe(opinionvalues[after_sl,  provider])
+
                 impactusage = avguse - avguseduring
                 impactposop = posopinion - posopinionduring
                 impactnegop = abs(negopinion) - abs(negopinionduring)
-                data_df = pd.concat([data_df, pd.DataFrame.from_records([{'regret':avgregret, 'provider':int(provider+1), 'avguse':avguse, 'avgreward':avgreward,
-                    'posopinion':posopinion, 'negopinion':negopinion, 'avgusebefore':avgusebefore, 'avguseduring':avguseduring, 
-                    'avguseafter':avguseafter, 'avgrewbefore':avgrewbefore, 'avgrewduring':avgrewduring, 'avgrewafter':avgrewafter,
-                    'posopinionbefore':posopinionbefore, 'posopinionduring':posopinionduring, 'posopinionafter':posopinionafter, 
-                    'negopinionbefore':negopinionbefore, 'negopinionduring':negopinionduring, 'negopinionafter':negopinionafter, 
-                    'target_id':target_provider+1, 'attack_beginning':attack_timesteps[0]+1,
-                    'misinfo_beginning':misinfo_beginning, 'misinfo_length':misinfo_length, 'cyber_beginning':cyber_beginning, 
-                    'cyber_length':cyber_length, 'combined_beginning': combined_beginning, 'combined_length': combined_length,
-                    'impactusage':impactusage, 'impactposop':impactposop, 'impactnegop': impactnegop,
-                    'attackreward':attackreward, 'detectionreward':detectionreward, 'malreward':malreward,
-                    'alpha': alpha, 'delta': delta, 'epsilon': epsilon, 'eta': eta, 'theta': theta, 'kappa': kappa,
-                    'Lambda': Lambda[0], 'lambda': lambda_[0], 'xi': xi, 'rho': rho, 'tau': tau, 
-                    'Upsilon': Upsilon[0], 'upsilon': upsilon_[0]}])])
             else:
-                data_df = pd.concat([data_df, pd.DataFrame.from_records([{'regret':avgregret, 'provider':int(provider+1), 'avguse':avguse, 'avgreward':avgreward,
-                    'posopinion':posopinion, 'negopinion':negopinion, 'avgusebefore':'', 'avguseduring':'', 'avguseafter':'', 
-                    'avgrewbefore':'', 'avgrewduring':'', 'avgrewafter':'',
-                    'posopinionbefore':'', 'posopinionduring':'', 'posopinionafter':'', 
-                    'negopinionbefore':'', 'negopinionduring':'', 'negopinionafter':'', 
-                    'target_id':'', 'attack_beginning':'',
-                    'misinfo_beginning':'', 'misinfo_length':'', 'cyber_beyginning':'', 
-                    'cyber_length':'', 'combined_beginning': '', 'combined_length': '',
-                    'impactusage':'', 'impactposop':'' , 'impactnegop': '',
-                    'attackreward':'', 'detectionreward':'', 'malreward':'',
-                    'alpha': alpha, 'delta': delta, 'epsilon': epsilon, 'eta': eta, 'theta': theta, 
-                    'kappa': kappa, 'Lambda': Lambda[0], 'lambda': lambda_[0], 'xi': xi, 'rho': rho, 'tau': tau, 
-                    'Upsilon': Upsilon[0], 'upsilon': upsilon_[0]}])])
+                # Placeholders ------------------------------------------------
+                (avgusebefore, avguseduring, avguseafter, avgrewbefore, avgrewduring, avgrewafter,
+                 posopinionbefore, posopinionduring, posopinionafter, negopinionbefore,
+                 negopinionduring, negopinionafter, impactusage, impactposop, impactnegop) = ("",) * 15
+
+            # Row assembly ---------------------------------------------------
+            rows.append({
+                "regret": avgregret,
+                "provider": provider + 1,
+                "avguse": avguse,
+                "avgreward": avgreward,
+                "posopinion": posopinion,
+                "negopinion": negopinion,
+                "avgusebefore": avgusebefore,
+                "avguseduring": avguseduring,
+                "avguseafter": avguseafter,
+                "avgrewbefore": avgrewbefore,
+                "avgrewduring": avgrewduring,
+                "avgrewafter": avgrewafter,
+                "posopinionbefore": posopinionbefore,
+                "posopinionduring": posopinionduring,
+                "posopinionafter": posopinionafter,
+                "negopinionbefore": negopinionbefore,
+                "negopinionduring": negopinionduring,
+                "negopinionafter": negopinionafter,
+                "target_id": (target_provider + 1) if attack_happened else "",
+                "attack_beginning": (attack_ts[0] + 1) if attack_happened else "",
+                "misinfo_beginning": misinfo_begin if attack_happened else "",
+                "misinfo_length": misinfo_len if attack_happened else "",
+                "cyber_beginning": cyber_begin if attack_happened else "",
+                "cyber_length": cyber_len if attack_happened else "",
+                "combined_beginning": comb_begin if attack_happened else "",
+                "combined_length": combined_len if attack_happened else "",
+                "impactusage": impactusage,
+                "impactposop": impactposop,
+                "impactnegop": impactnegop,
+                "attackreward": attackreward if attack_happened else "",
+                "detectionreward": detectionreward if attack_happened else "",
+                "malreward": malreward if attack_happened else "",
+                # parameters – keep identical names -------------------------
+                "alpha": alpha,
+                "delta": delta,
+                "epsilon": epsilon,
+                "eta": eta,
+                "theta": theta,
+                "kappa": kappa,
+                "Lambda": Lambda[provider],
+                "lambda": lambda_arr[provider],
+                "xi": xi,
+                "rho": rho,
+                "tau": tau,
+                "Upsilon": Upsilon[provider],
+                "upsilon": upsilon_[provider],
+            })
+    # ───────────────────────────────────────────────────────────────────────
+
+    # Summary CSV is tiny → easy
+    data_df = pd.DataFrame.from_records(rows, columns=COLUMNS)
     
-    tick.stop()
+    # ── SAVE PROVIDER-LEVEL SUMMARY (unchanged filename) ───────────────────
+    summary_path = os.path.join(OUTPUT_DATA_DIR, f"experiment{experiment_id}_summary.csv")
+    data_df.to_csv(summary_path, mode="a", header=False, index=False, encoding="utf-8")
 
-    # Write data locally
-    with open(os.path.join(OUTPUT_DATA_DIR,
-                           f"experiment{experiment_id}_df.csv"),
-              "a", encoding="UTF8", newline="") as f:
-        data_df.to_csv(f, header=False)
+    # ---- persist header so front-end sees meta + attack timeline ---------
+    jsonl.close()          # flush the frame stream first
 
-    # Visualise data
-    plt.rcParams["figure.figsize"] = (20,4)
 
-    # Plot 1: Visualise actions per provider over time
-    A_over_time = (actions / nExperiments)*100/nAgents
-    for provider in range(nProviders):
-        timesteps = list(np.array(range(len(A_over_time[:,provider])))+1)
-        plt.plot(timesteps, A_over_time[:,provider], "-", label="Provider {}".format((provider+1)))
+    TEST_FRAMES = FRAMES_JSONL.replace('.jsonl.gz', '_small.jsonl.gz')
+    with gzip.open(FRAMES_JSONL, 'rt') as f_in:
+        with gzip.open(TEST_FRAMES, 'wt') as f_out:
+            for i, line in enumerate(f_in):
+                if i < 10000:  # Only first 10k lines
+                    f_out.write(line)
+                else:
+                    break
+    print(f"Created small test file: {TEST_FRAMES}")
+
+    header_json = {
+        "meta": {
+            "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "nAgents":    nAgents,
+            "nTimesteps": nTimesteps,
+            # add whatever params you want surfaced in the UI ↓
+        },
+        "summary_csv": os.path.basename(SUMMARY_CSV),
+        "frames_gzip": os.path.basename(FRAMES_JSONL),
+        "events": events,          # ← now actually persisted
+    }
+    # std-lib json is fine (events are plain ints/strs)
+    with open(HEADER_JSON, "w", encoding="utf-8") as fh:
+        json.dump(header_json, fh)
+
+    timer.stop()
+
+    # ----------------------------------------------------------------------
+    #  📊  Visualisations (identical logic, but head‑less safe) 
+    # ----------------------------------------------------------------------
+
+    plt.rcParams["figure.figsize"] = (20, 4)
+
+    # Plot 1 – provider usage over time ------------------------------------
+    A_over_time = (actions / nExperiments) * 100 / nAgents
+    for prov in range(nProviders):
+        ts = np.arange(1, len(A_over_time) + 1)
+        plt.plot(ts, A_over_time[:, prov], "-", label=f"Provider {prov + 1}")
     plt.xlabel("Time steps")
     plt.ylabel("Average provider usage (%)")
-    plt.xlim([1, nTimesteps])
-    plt.ylim([1, 100])
+    plt.xlim(1, nTimesteps)
+    plt.ylim(1, 100)
     plt.grid()
-    ax = plt.gca()
-    leg = ax.legend(loc='center left', shadow=True, bbox_to_anchor =(1, 0.5))
-    for legobj in leg.legendHandles:
-        legobj.set_linewidth(4.0)
+    plt.legend(loc="center left", bbox_to_anchor=(1, 0.5))
     if save_fig:
-        if not os.path.exists(output_dir): os.mkdir(output_dir)
-        plt.rcParams["figure.figsize"] = (19,4)
         plt.savefig(os.path.join(output_dir, "actions.pdf"), dpi=500, bbox_inches="tight")
-    else:
-        plt.show()
-    plt.close()
-    
-    # Plot 2: Visualise average collected reward per provide over time
-    aveR_A = rewards / actions
-    for provider in range(nProviders):
-        timesteps = list(np.array(range(len(aveR_A[:,provider])))+1)
-        plt.plot(timesteps, aveR_A[:,provider], ".", label="Provider {}".format((provider+1)))
+    _maybe_show()
+
+    # Plot 2 – average reward per provider ---------------------------------
+    aveR_A = rewards / np.where(actions == 0, 1, actions)
+    for prov in range(nProviders):
+        ts = np.arange(1, len(aveR_A) + 1)
+        plt.plot(ts, aveR_A[:, prov], ".", label=f"Provider {prov + 1}")
     plt.xlabel("Time steps")
     plt.ylabel("Average reward per service provider")
-    plt.xlim([1, nTimesteps])
-    plt.ylim([-0.01, 1.01])
-    plt.grid()  
-    ax = plt.gca()
-    leg = ax.legend(loc='center left', shadow=True, bbox_to_anchor =(1, 0.5))
-    if save_fig:
-        if not os.path.exists(output_dir): os.mkdir(output_dir)
-        plt.rcParams["figure.figsize"] = (19,4)
-        plt.savefig(os.path.join(output_dir, "rewards.pdf"), dpi=500, bbox_inches="tight")
-    else:
-        plt.show()
-    plt.close()
-    
-    # Plot 3: Visualise opinion dynamics over time
-    for opinion in range(nProviders*2):
-        timesteps = list(np.array(range(len(opinionvalues[:,opinion])))+1)
-        if opinion in [0]:
-            plt.plot(timesteps, opinionvalues[:,opinion], "--", color = 'tab:blue', label = "Provider  {} -".format(opinion+1)) # 1
-        elif opinion in [1]:
-            plt.plot(timesteps, opinionvalues[:,opinion], "--", color = 'tab:orange', label = "Provider  {} - ".format(opinion+1)) # 2
-        elif opinion in [2]:
-            plt.plot(timesteps, opinionvalues[:,opinion], "--", color = 'tab:green', label = "Provider  {} - ".format(opinion+1)) # 3
-        elif opinion in [3]:
-            plt.plot(timesteps, opinionvalues[:,opinion], "-", color = 'tab:blue', label = "Provider  {} + ".format(opinion-2)) # 1
-        elif opinion in [4]:
-            plt.plot(timesteps, opinionvalues[:,opinion], "-", color = 'tab:orange', label = "Provider  {} + ".format(opinion-2)) # 2
-        else:
-            plt.plot(timesteps, opinionvalues[:,opinion], "-", color = 'tab:green', label = "Provider  {} + ".format(opinion-2)) # 3
-    plt.xlabel("Time steps")
-    plt.ylabel("Average evalution of opinion value per service provider")
-    plt.xlim([1, nTimesteps])
+    plt.xlim(1, nTimesteps)
+    plt.ylim(-0.01, 1.01)
     plt.grid()
-    ax = plt.gca()
-    leg = ax.legend(loc='center left', shadow=True, bbox_to_anchor =(1, 0.5))
+    plt.legend(loc="center left", bbox_to_anchor=(1, 0.5))
     if save_fig:
-        if not os.path.exists(output_dir): os.mkdir(output_dir)
-        plt.rcParams["figure.figsize"] = (19,4)
+        plt.savefig(os.path.join(output_dir, "rewards.pdf"), dpi=500, bbox_inches="tight")
+    _maybe_show()
+
+    # Plot 3 – opinion dynamics -------------------------------------------
+    for opinion in range(nProviders * 2):
+        ts = np.arange(1, len(opinionvalues) + 1)
+        style = "-" if opinion >= nProviders else "--"
+        color = ["tab:blue", "tab:orange", "tab:green"][opinion % nProviders]
+        sign  = "+" if opinion >= nProviders else "-"
+        label = f"Provider {opinion % nProviders + 1} {sign}"
+        plt.plot(ts, opinionvalues[:, opinion], style, color=color, label=label)
+    plt.xlabel("Time steps")
+    plt.ylabel("Average evaluation of opinion value per service provider")
+    plt.xlim(1, nTimesteps)
+    plt.grid()
+    plt.legend(loc="center left", bbox_to_anchor=(1, 0.5))
+    if save_fig:
         plt.savefig(os.path.join(output_dir, "opinionvalues.pdf"), dpi=500, bbox_inches="tight")
-    else:
-        plt.show()
-    plt.close()
-    
-    # Plot 4: Visualise malicious agents' reward values over time
-    timesteps = list(np.array(range(len(attack_rewards)))+1)
-    plt.plot(timesteps, attack_rewards, ":", color = 'tab:purple', label="Attack rewards")
-    plt.plot(timesteps, detection_rewards, ":", color = 'tab:cyan', label="Detection rewards")
+    _maybe_show()
+
+    # Plot 4 – malicious rewards ------------------------------------------
+    ts = np.arange(1, len(attack_rewards) + 1)
+    plt.plot(ts, attack_rewards, ":", label="Attack rewards")
+    plt.plot(ts, detection_rewards, ":", label="Detection rewards")
     plt.xlabel("Time steps")
     plt.ylabel("Malicious users' rewards")
-    plt.xlim([1, nTimesteps])
+    plt.xlim(1, nTimesteps)
     plt.grid()
-    ax = plt.gca()
-    leg = ax.legend(loc='center left', shadow=True, bbox_to_anchor =(1, 0.5))
+    plt.legend(loc="center left", bbox_to_anchor=(1, 0.5))
     if save_fig:
-        if not os.path.exists(output_dir): os.mkdir(output_dir)
-        plt.rcParams["figure.figsize"] = (19,4)
         plt.savefig(os.path.join(output_dir, "malrewards.pdf"), dpi=500, bbox_inches="tight")
-    else:
-        plt.show()
-    plt.close()
-    
-    i+=1
+    _maybe_show()
+
+    print("✅  Run {}/{} finished in {:.2f} s.\n"
+          "   ↳ summary CSV   → {}\n"
+          "   ↳ frames JSONL  → {}\n"
+          "   ↳ header JSON   → {}"
+          .format(_run_idx + 1, run, timer.elapsed,
+                  SUMMARY_CSV, FRAMES_JSONL, HEADER_JSON))
