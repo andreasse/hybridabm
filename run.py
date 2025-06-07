@@ -42,6 +42,9 @@ from setup_values import (
     lambda_ as lambda_arr, xi, rho, tau, Upsilon, upsilon_, experiment_id,
 )
 
+# Export every nth timestep
+EXPORT_INTERVAL = 24
+
 ORJSON_OPTS = (
     orjson.OPT_SERIALIZE_NUMPY
     | orjson.OPT_NAIVE_UTC
@@ -106,7 +109,7 @@ for _run_idx in range(run):
         print(f"[Experiment {exp + 1}/{nExperiments}]")
 
         actions, rewards, opinionvalues, regrets, attack_decisions, targets, \
-        attack_methods, attack_rewards, detection_rewards = experiment(timestep, nTimesteps)
+        attack_methods, attack_rewards, detection_rewards, links = experiment(timestep, nTimesteps)
 
         # Average regret after warm‑up window W
         avgregret = np.mean(regrets[W + 1:]) / nAgents
@@ -114,6 +117,9 @@ for _run_idx in range(run):
         # ── STREAM -- one JSONL per user per timestep — keeps RAM flat ──
         agent_id = 0
         for t in range(nTimesteps):
+            #export every nth timestep
+            if t % EXPORT_INTERVAL !=0:
+                continue
             for prov in range(nProviders):
                 n_here = int(actions[t, prov])
                 if n_here == 0:
@@ -295,6 +301,7 @@ for _run_idx in range(run):
         "summary_csv": os.path.basename(SUMMARY_CSV),
         "frames_gzip": os.path.basename(FRAMES_JSONL),
         "events": events,          # ← now actually persisted
+        "links": [{"source": s, "target": t, "type": typ} for s, t, typ in links]
     }
     # std-lib json is fine (events are plain ints/strs)
     with open(HEADER_JSON, "w", encoding="utf-8") as fh:

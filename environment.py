@@ -60,6 +60,9 @@ class Environment:
         """
         for provider in range(self.nProviders):
             self.providers.append(provider)
+            node_id = f"prov_{provider}"
+            if node_id not in self.network:            # ← guard
+                self.network.add_node(node_id, role="provider")
         return self.providers
     
     def colour_graph(self):

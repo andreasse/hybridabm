@@ -19,9 +19,10 @@ else:
 
 timestep = 1
 nExperiments = 1
-nTimesteps = 10000
+#nTimesteps = 10000
+nTimesteps = 8000
 W = 2000
-nAgents = 1000
+nAgents = 500
 if cyberattack or misinformation or coordinated_attack:
     nMalAgents = int(0.05*nAgents)
 else: # no malicious users are introduced if no attack is selected
@@ -45,5 +46,5 @@ Upsilon = [0.01,0.01,0.01] # central 1 to 0 (latest: upsilon)
 upsilon_ = [0.30,0.30,0.30] # central 0 to 1 (paper: psi)
 
 # Save figures
-save_fig = False
+save_fig = True
 output_dir = os.path.join(os.getcwd(), "output_fig")
