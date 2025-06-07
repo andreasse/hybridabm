@@ -128,7 +128,7 @@ for _run_idx in range(run):
             for agent in range(nAgents):
                 provider = cyber_matrix[t, agent]
                 if provider != -1:  # agent is connected to a provider
-                    edge = (str(agent), f"prov_{provider}")
+                    edge = (str(agent), f"P-{provider}")
                     current_edges.add(edge)
             
             # Track changes since last export
@@ -176,7 +176,7 @@ for _run_idx in range(run):
                 # Add provider nodes
                 for prov in range(nProviders):
                     nodes_for_frame.append({
-                        "id": f"prov_{prov}",
+                        "id": f"P-{prov}",
                         "prov": -1,    # Special marker for provider nodes
                         "reward": 1.0,  # Frontend expects providers to have reward 1.0
                         "mal": 0,
