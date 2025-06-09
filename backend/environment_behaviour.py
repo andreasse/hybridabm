@@ -217,3 +217,51 @@ class EnvironmentBehaviour:
             regret = optimal_value - self.network.nodes[agent]["r(a)"][timestep]
             self.regret[timestep] += regret
         return self.regret[timestep]
+    
+    def generate_info_pulses(self, agent_behaviour, timestep):
+        """
+        Generate information flow pulses based on agent opinion exchanges
+        Returns list of pulse events for visualization
+        """
+        pulses = []
+        
+        # Track opinion exchanges during this timestep
+        for agent in self.agents:
+            # Check if agent communicated this timestep
+            if ("zeta" in self.network.nodes[agent] and 
+                timestep < len(self.network.nodes[agent]["zeta"]) and
+                self.network.nodes[agent]["zeta"][timestep] != 0):
+                
+                communicating_with = self.network.nodes[agent]["zeta"][timestep]
+                
+                # Determine if this was misinformation or truth telling
+                # Check if the communicating partner is malicious and an attack is active
+                is_misinfo = (communicating_with in self.malagents and 
+                            timestep < len(self.attack_methods) and
+                            self.attack_methods[timestep] in [1, 2])  # Misinfo or combo attack
+                
+                # Determine which provider is being discussed
+                # Look at agent's recent action to infer topic
+                target_provider = None
+                if ("a" in self.network.nodes[agent] and 
+                    timestep < len(self.network.nodes[agent]["a"]) and
+                    self.network.nodes[agent]["a"][timestep] != -1):
+                    target_provider = self.network.nodes[agent]["a"][timestep]
+                elif (timestep < len(self.targets) and self.targets[timestep] != -1):
+                    # Use attack target if no action available
+                    target_provider = self.targets[timestep]
+                
+                if target_provider is not None:
+                    # Create pulse event
+                    truth_value = -1 if is_misinfo else 1
+                    
+                    pulse = {
+                        "t": timestep,
+                        "src": str(communicating_with),
+                        "dst": str(agent),
+                        "truth": truth_value,
+                        "tgt": f"P-{target_provider}"
+                    }
+                    pulses.append(pulse)
+        
+        return pulses
