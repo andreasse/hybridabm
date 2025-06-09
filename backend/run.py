@@ -130,6 +130,9 @@ for _run_idx in range(run):
         attack_adds = set()  
         attack_removes = set()
         
+        # Node delta tracking
+        prev_nodes = {}
+        
         # Create behavior objects with enhanced methods
         # (This is needed to access the new detection and sentiment tracking)
         env = Environment(nAgents, nMalAgents, nProviders, nTimesteps)
@@ -203,13 +206,15 @@ for _run_idx in range(run):
             
             # Export on interval
             if t % EXPORT_INTERVAL == 0:
-                # Build enhanced nodes for this export timestep
+                # Build current node state
+                current_nodes = {}
                 nodes_for_frame = []
+                node_deltas = {"add": [], "remove": [], "update": []}
                 
                 # Simulate detection states and satisfaction for agents
                 attack_info = mal_behaviour.get_active_attack_info(t)
                 
-                # Add agent nodes with enhanced fields
+                # Build current agent nodes
                 for agent in range(nAgents):
                     provider = cyber_matrix[t, agent]
                     if provider != -1:  # agent is connected to a provider
@@ -243,7 +248,7 @@ for _run_idx in range(run):
                                 if communicated_with_malicious:
                                     det_misinfo = 1 if np.random.random() <= eta else 0
                         
-                        nodes_for_frame.append({
+                        node_data = {
                             "id": str(agent),
                             "prov": provider,
                             "reward": r_per_user,
@@ -254,7 +259,8 @@ for _run_idx in range(run):
                             "sat": sat,
                             "detCyber": det_cyber,
                             "detMisinfo": det_misinfo
-                        })
+                        }
+                        current_nodes[str(agent)] = node_data
                 
                 # Calculate provider sentiment and add provider nodes
                 serv_behaviour.calculate_sentiment(network, t)
@@ -268,7 +274,7 @@ for _run_idx in range(run):
                               attack_info["target"] == prov and 
                               attack_info["method"] in [0, 2]) else 1
                     
-                    nodes_for_frame.append({
+                    node_data = {
                         "id": provider_id,
                         "prov": -1,    # Special marker for provider nodes
                         "reward": 1.0,  # Frontend expects providers to have reward 1.0
@@ -277,7 +283,32 @@ for _run_idx in range(run):
                         # NEW FIELDS
                         "zd": zd,
                         "sentiment": provider_stats[provider_id]["sentiment"]
-                    })
+                    }
+                    current_nodes[provider_id] = node_data
+                
+                # First frame: send all nodes, no deltas
+                if not prev_nodes:
+                    nodes_for_frame = list(current_nodes.values())
+                else:
+                    # Compare with previous state and build deltas
+                    for node_id, node_data in current_nodes.items():
+                        if node_id not in prev_nodes:
+                            # New node
+                            node_deltas["add"].append(node_data)
+                        elif prev_nodes[node_id] != node_data:
+                            # Changed node
+                            node_deltas["update"].append(node_data)
+                    
+                    # Check for removed nodes
+                    for node_id in prev_nodes:
+                        if node_id not in current_nodes:
+                            node_deltas["remove"].append({"id": node_id})
+                    
+                    # Only include changed nodes in frame
+                    nodes_for_frame = node_deltas["add"] + node_deltas["update"]
+                
+                # Update previous state
+                prev_nodes = current_nodes.copy()
                 
                 # Convert accumulated changes to new 4-layer edge format
                 edge_add = []
@@ -330,13 +361,19 @@ for _run_idx in range(run):
                 pulses = env_behaviour.generate_info_pulses(reg_behaviour, t)
                 
                 # Write enhanced JSONL line per frame
-                jsonl.write(dumps({
+                frame_data = {
                     "t": t + 1,
                     "nodes": nodes_for_frame,
                     "edgeDeltas": {"add": edge_add, "remove": edge_remove},
                     "provStats": provider_stats,  # NEW: Provider statistics
                     "pulses": pulses              # NEW: Information flow pulses
-                }) + b"\n")
+                }
+                
+                # Add nodeDeltas for delta frames (not first frame)
+                if prev_nodes and (node_deltas["add"] or node_deltas["remove"] or node_deltas["update"]):
+                    frame_data["nodeDeltas"] = node_deltas
+                
+                jsonl.write(dumps(frame_data) + b"\n")
                 
                 # Reset accumulators after export
                 service_adds.clear()
