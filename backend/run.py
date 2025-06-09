@@ -43,7 +43,7 @@ from setup_values import (
 )
 
 # Export every nth timestep
-EXPORT_INTERVAL = 24
+EXPORT_INTERVAL = 1
 
 ORJSON_OPTS = (
     orjson.OPT_SERIALIZE_NUMPY
@@ -183,11 +183,47 @@ for _run_idx in range(run):
                         "opin": 0
                     })
                 
-                # Convert accumulated changes to JSON format
-                edge_add = [{"id": edge_id(s, tgt), "source": s, "target": tgt, "type": "cyber"}
-                           for s, tgt in accumulated_adds]
-                edge_remove = [{"id": edge_id(s, tgt), "source": s, "target": tgt, "type": "cyber"}
-                              for s, tgt in accumulated_removes]
+                # Convert accumulated changes to JSON format with proper edge typing
+                edge_add = []
+                for s, tgt in accumulated_adds:
+                    edge_type = "service"  # Default type for agent-provider connections
+                    
+                    # Check if this is a provider target and if it's under cyber attack
+                    if tgt.startswith("P-"):
+                        provider_id = int(tgt.split("-")[1])
+                        # Check if this provider is under cyber attack at this timestep
+                        is_cyber_attack = (t < len(attack_decisions) and 
+                                          attack_decisions[t] == 1 and 
+                                          t < len(targets) and 
+                                          targets[t] == provider_id and 
+                                          t < len(attack_methods) and 
+                                          (attack_methods[t] == 0 or attack_methods[t] == 2))
+                        
+                        if is_cyber_attack:
+                            edge_type = "cyber"
+                    
+                    edge_add.append({"id": edge_id(s, tgt), "source": s, "target": tgt, "type": edge_type})
+                
+                edge_remove = []
+                for s, tgt in accumulated_removes:
+                    edge_type = "service"  # Default type for edge removal
+                    
+                    # Check if this was a provider target under cyber attack
+                    if tgt.startswith("P-"):
+                        provider_id = int(tgt.split("-")[1])
+                        # For removes, check if provider was under attack in previous timestep
+                        prev_t = max(0, t - 1)
+                        is_cyber_attack = (prev_t < len(attack_decisions) and 
+                                          attack_decisions[prev_t] == 1 and 
+                                          prev_t < len(targets) and 
+                                          targets[prev_t] == provider_id and 
+                                          prev_t < len(attack_methods) and 
+                                          (attack_methods[prev_t] == 0 or attack_methods[prev_t] == 2))
+                        
+                        if is_cyber_attack:
+                            edge_type = "cyber"
+                    
+                    edge_remove.append({"id": edge_id(s, tgt), "source": s, "target": tgt, "type": edge_type})
                 
                 # Write one JSONL line per frame
                 jsonl.write(dumps({
