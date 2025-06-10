@@ -178,3 +178,68 @@ class MaliciousAgentsBehaviour:
         else: 
             feedback = 0 # Give no information
         return feedback
+    
+    def generate_attack_edges(self, timestep):
+        """
+        Generate attack edges for current timestep based on active attacks
+        Returns list of attack edges with layer="attack" and appropriate phase
+        """
+        attack_edges = []
+        
+        # Check if attack is active
+        if (timestep < len(self.attack_decisions) and 
+            self.attack_decisions[timestep] == 1 and
+            timestep < len(self.targets) and 
+            self.targets[timestep] != -1 and
+            timestep < len(self.attack_methods) and
+            self.attack_methods[timestep] != -1):
+            
+            target = self.targets[timestep]
+            attack_method = self.attack_methods[timestep]
+            
+            # Map attack method to phase
+            phase_map = {0: "CYBER", 1: "MISINFO", 2: "COMBO"}
+            phase = phase_map.get(attack_method, "NONE")
+            
+            # Generate attack edges from each malicious agent to target provider
+            for mal_agent in self.malagents:
+                edge = {
+                    "id": f"attack-{mal_agent}-P-{target}",
+                    "source": str(mal_agent),
+                    "target": f"P-{target}",
+                    "layer": "attack",
+                    "phase": phase,
+                    "dir": "→",
+                    "type": "attack"  # For backward compatibility
+                }
+                attack_edges.append(edge)
+        
+        return attack_edges
+    
+    def get_active_attack_info(self, timestep):
+        """
+        Get information about currently active attacks
+        Returns dict with attack status, target, and method
+        """
+        attack_info = {
+            "active": False,
+            "target": -1,
+            "method": -1,
+            "phase": "NONE"
+        }
+        
+        if (timestep < len(self.attack_decisions) and 
+            self.attack_decisions[timestep] == 1 and
+            timestep < len(self.targets) and 
+            self.targets[timestep] != -1 and
+            timestep < len(self.attack_methods) and
+            self.attack_methods[timestep] != -1):
+            
+            phase_map = {0: "CYBER", 1: "MISINFO", 2: "COMBO"}
+            
+            attack_info["active"] = True
+            attack_info["target"] = self.targets[timestep]
+            attack_info["method"] = self.attack_methods[timestep]
+            attack_info["phase"] = phase_map.get(self.attack_methods[timestep], "NONE")
+        
+        return attack_info

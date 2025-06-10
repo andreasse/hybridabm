@@ -15,7 +15,7 @@ def experiment(timestep, nTimesteps):
     network, neighbours = env.form_network(kappa, rho)
     links = [(str(min(u,v)), str(max(u,v)), "info")            # ↓ ensures ("4","10") and ("10","4") don't both sneak in
              for u, v in network.edges]
-    final_provider_map = set()
+    cyber_matrix = np.full((nTimesteps, nAgents), -1, dtype=int)
     agents, regagents, malagents = env.create_agents()
     providers = env.create_providers()
     env.create_attributes()
@@ -51,7 +51,7 @@ def experiment(timestep, nTimesteps):
         # All agents   
         for agent in agents:
             action = reg_behaviour.select_action(agent, epsilon, tau, timestep)
-            final_provider_map.add((agent, action))
+            cyber_matrix[step, agent] = action
             reward = reg_behaviour.receive_reward(agent, action, endpoint, timestep)
             reg_behaviour.update_Q(agent, action, reward, alpha)
             opinion = reg_behaviour.express_opinion(agent, epsilon, timestep)
@@ -80,9 +80,6 @@ def experiment(timestep, nTimesteps):
         detection_rewards.append(sum(detection_reward))
         timestep+=1
     
-    # Add cyber edges after simulation
-    links.extend([(str(a), f"prov_{p}", "cyber") for a, p in final_provider_map])
-    
     return np.array(actions), np.array(rewards), np.array(opinionvalues), np.array(regrets), \
-        np.array(attack_decisions), np.array(targets), np.array(attack_methods), np.array(attack_rewards), np.array(detection_rewards), links
+        np.array(attack_decisions), np.array(targets), np.array(attack_methods), np.array(attack_rewards), np.array(detection_rewards), links, cyber_matrix
     

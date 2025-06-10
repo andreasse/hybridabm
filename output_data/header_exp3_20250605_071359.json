@@ -1,1 +1,0 @@
-{"meta": {"generated": "2025-06-05T07:26:12+00:00", "nAgents": 1000, "nTimesteps": 10000}, "summary_csv": "experiment3_summary.csv", "frames_gzip": "frames_exp3_20250605_071359.jsonl.gz", "events": [{"t": 2903, "type": "CYBER"}, {"t": 2904, "type": "COMBO"}, {"t": 2915, "type": "MISINFO"}]}

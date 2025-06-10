@@ -36,6 +36,11 @@ import numpy as np, pandas as pd, orjson
 
 from timer import Timer
 from experiment import experiment
+from environment import Environment
+from environment_behaviour import EnvironmentBehaviour
+from agent_behaviour import AgentsBehaviour
+from serviceprovider_behaviour import ServiceProvidersBehaviour
+from maliciousagent_behaviour import MaliciousAgentsBehaviour
 from setup_values import (
     timestep, nTimesteps, nExperiments, nProviders, nAgents, nMalAgents, W,
     save_fig, output_dir, alpha, delta, epsilon, eta, theta, kappa, Lambda,
@@ -43,7 +48,7 @@ from setup_values import (
 )
 
 # Export every nth timestep
-EXPORT_INTERVAL = 24
+EXPORT_INTERVAL = 1
 
 ORJSON_OPTS = (
     orjson.OPT_SERIALIZE_NUMPY
@@ -52,6 +57,9 @@ ORJSON_OPTS = (
 )
 def dumps(obj):          # keep it tiny
     return orjson.dumps(obj, option=ORJSON_OPTS)
+
+def edge_id(src, tgt): 
+    return f"{src}-{tgt}"
 
 ###############################################################################
 # IO PATHS & CONSTANTS
@@ -109,35 +117,269 @@ for _run_idx in range(run):
         print(f"[Experiment {exp + 1}/{nExperiments}]")
 
         actions, rewards, opinionvalues, regrets, attack_decisions, targets, \
-        attack_methods, attack_rewards, detection_rewards, links = experiment(timestep, nTimesteps)
+        attack_methods, attack_rewards, detection_rewards, links, cyber_matrix = experiment(timestep, nTimesteps)
 
         # Average regret after warm‑up window W
         avgregret = np.mean(regrets[W + 1:]) / nAgents
 
-        # ── STREAM -- one JSONL per user per timestep — keeps RAM flat ──
-        agent_id = 0
+        # ── STREAM -- one JSONL per timestep with 4-layer edge architecture ──
+        prev_service_edges = set()
+        prev_attack_edges = set()
+        service_adds = set()
+        service_removes = set()
+        attack_adds = set()  
+        attack_removes = set()
+        
+        # Node delta tracking
+        prev_nodes = {}
+        
+        # Create behavior objects with enhanced methods
+        # (This is needed to access the new detection and sentiment tracking)
+        env = Environment(nAgents, nMalAgents, nProviders, nTimesteps)
+        network, neighbours = env.form_network(kappa, rho)
+        agents_list, regagents, malagents = env.create_agents()
+        providers_list = env.create_providers()
+        env.create_attributes()
+        
+        env_behaviour = EnvironmentBehaviour(agents_list, regagents, malagents, providers_list, neighbours, network, nTimesteps)
+        reg_behaviour = AgentsBehaviour(network, providers_list)
+        serv_behaviour = ServiceProvidersBehaviour(providers_list, agents_list, Upsilon, upsilon_, Lambda, lambda_arr, nTimesteps)
+        mal_behaviour = MaliciousAgentsBehaviour(network, malagents, providers_list, xi, nTimesteps)
+        
+        # Copy attack data from experiment results
+        mal_behaviour.attack_decisions = attack_decisions
+        mal_behaviour.targets = targets  
+        mal_behaviour.attack_methods = attack_methods
+        
         for t in range(nTimesteps):
-            #export every nth timestep
-            if t % EXPORT_INTERVAL !=0:
-                continue
-            for prov in range(nProviders):
-                n_here = int(actions[t, prov])
-                if n_here == 0:
-                    continue
-                r_per_user = rewards[t, prov] / n_here
-                common = {
+            # Build current service edges (agent -> provider connections)
+            current_service_edges = set()
+            for agent in range(nAgents):
+                provider = cyber_matrix[t, agent]
+                if provider != -1:  # agent is connected to a provider
+                    edge = (str(agent), f"P-{provider}")
+                    current_service_edges.add(edge)
+            
+            # Get attack edges from malicious behavior
+            current_attack_edges = set()
+            attack_edges_data = mal_behaviour.generate_attack_edges(t)
+            for edge_data in attack_edges_data:
+                edge_tuple = (edge_data["source"], edge_data["target"])
+                current_attack_edges.add((edge_tuple, edge_data["phase"]))
+            
+            # Track service edge changes
+            newly_added_service = current_service_edges - prev_service_edges
+            newly_removed_service = prev_service_edges - current_service_edges
+            
+            # Track attack edge changes  
+            newly_added_attack = current_attack_edges - prev_attack_edges
+            newly_removed_attack = prev_attack_edges - current_attack_edges
+            
+            # Accumulate service edge changes
+            for edge in newly_added_service:
+                if edge in service_removes:
+                    service_removes.discard(edge)
+                else:
+                    service_adds.add(edge)
+            
+            for edge in newly_removed_service:
+                if edge in service_adds:
+                    service_adds.discard(edge)
+                else:
+                    service_removes.add(edge)
+            
+            # Accumulate attack edge changes
+            for edge in newly_added_attack:
+                if edge in attack_removes:
+                    attack_removes.discard(edge)
+                else:
+                    attack_adds.add(edge)
+            
+            for edge in newly_removed_attack:
+                if edge in attack_adds:
+                    attack_adds.discard(edge)
+                else:
+                    attack_removes.add(edge)
+            
+            prev_service_edges = current_service_edges
+            prev_attack_edges = current_attack_edges
+            
+            # Export on interval
+            if t % EXPORT_INTERVAL == 0:
+                # Build current node state
+                current_nodes = {}
+                nodes_for_frame = []
+                node_deltas = {"add": [], "remove": [], "update": []}
+                
+                # Simulate detection states and satisfaction for agents
+                attack_info = mal_behaviour.get_active_attack_info(t)
+                
+                # Build current agent nodes
+                for agent in range(nAgents):
+                    provider = cyber_matrix[t, agent]
+                    if provider != -1:  # agent is connected to a provider
+                        # Calculate reward for this agent's provider
+                        n_here = int(actions[t, provider])
+                        r_per_user = rewards[t, provider] / n_here if n_here > 0 else 0
+                        
+                        # Calculate endpoint availability (ld) - 0 if under attack, reward otherwise
+                        ld = 0 if (attack_info["active"] and 
+                                  attack_info["target"] == provider and 
+                                  attack_info["method"] in [0, 2]) else r_per_user
+                        
+                        # Calculate satisfaction (sat) - 1 if ld >= 0.8
+                        sat = 1 if ld >= 0.8 else 0
+                        
+                        # Simulate detection states based on probabilities
+                        det_cyber = 0
+                        det_misinfo = 0
+                        
+                        if attack_info["active"] and attack_info["target"] == provider:
+                            if attack_info["method"] in [0, 2] and ld == 0:  # Cyber attack affecting this agent
+                                det_cyber = 1 if np.random.random() <= theta else 0
+                            if attack_info["method"] in [1, 2]:  # Misinformation attack
+                                # Check if agent communicated with malicious agent
+                                communicated_with_malicious = (
+                                    t > 0 and 
+                                    "zeta" in network.nodes[agent] and 
+                                    t < len(network.nodes[agent]["zeta"]) and
+                                    network.nodes[agent]["zeta"][t] in malagents
+                                )
+                                if communicated_with_malicious:
+                                    det_misinfo = 1 if np.random.random() <= eta else 0
+                        
+                        node_data = {
+                            "id": str(agent),
+                            "prov": provider,
+                            "reward": r_per_user,
+                            "mal": int(agent < nMalAgents),
+                            "opin": opinionvalues[t, provider + 3] if (provider + 3) < opinionvalues.shape[1] else 0,
+                            # NEW FIELDS
+                            "ld": ld,
+                            "sat": sat,
+                            "detCyber": det_cyber,
+                            "detMisinfo": det_misinfo
+                        }
+                        current_nodes[str(agent)] = node_data
+                
+                # Calculate provider sentiment and add provider nodes
+                serv_behaviour.calculate_sentiment(network, t)
+                provider_stats = serv_behaviour.get_provider_stats(t)
+                
+                for prov in range(nProviders):
+                    provider_id = f"P-{prov}"
+                    
+                    # Get central state (zd) - 0 if under cyber attack, 1 otherwise  
+                    zd = 0 if (attack_info["active"] and 
+                              attack_info["target"] == prov and 
+                              attack_info["method"] in [0, 2]) else 1
+                    
+                    node_data = {
+                        "id": provider_id,
+                        "prov": -1,    # Special marker for provider nodes
+                        "reward": 1.0,  # Frontend expects providers to have reward 1.0
+                        "mal": 0,
+                        "opin": 0,
+                        # NEW FIELDS
+                        "zd": zd,
+                        "sentiment": provider_stats[provider_id]["sentiment"]
+                    }
+                    current_nodes[provider_id] = node_data
+                
+                # First frame: send all nodes, no deltas
+                if not prev_nodes:
+                    nodes_for_frame = list(current_nodes.values())
+                else:
+                    # Compare with previous state and build deltas
+                    for node_id, node_data in current_nodes.items():
+                        if node_id not in prev_nodes:
+                            # New node
+                            node_deltas["add"].append(node_data)
+                        elif prev_nodes[node_id] != node_data:
+                            # Changed node
+                            node_deltas["update"].append(node_data)
+                    
+                    # Check for removed nodes
+                    for node_id in prev_nodes:
+                        if node_id not in current_nodes:
+                            node_deltas["remove"].append({"id": node_id})
+                    
+                    # Only include changed nodes in frame
+                    nodes_for_frame = node_deltas["add"] + node_deltas["update"]
+                
+                # Update previous state
+                prev_nodes = current_nodes.copy()
+                
+                # Convert accumulated changes to new 4-layer edge format
+                edge_add = []
+                
+                # Add service edges
+                for s, tgt in service_adds:
+                    edge_add.append({
+                        "id": edge_id(s, tgt),
+                        "source": s,
+                        "target": tgt,
+                        "layer": "service",
+                        "phase": "NONE",
+                        "dir": "→",
+                        "type": "service"  # Backward compatibility
+                    })
+                
+                # Add attack edges
+                for (s, tgt), phase in attack_adds:
+                    edge_add.append({
+                        "id": f"attack-{edge_id(s, tgt)}",
+                        "source": s,
+                        "target": tgt,
+                        "layer": "attack",
+                        "phase": phase,
+                        "dir": "→",
+                        "type": "attack"  # Backward compatibility
+                    })
+                
+                edge_remove = []
+                
+                # Remove service edges
+                for s, tgt in service_removes:
+                    edge_remove.append({
+                        "id": edge_id(s, tgt),
+                        "source": s,
+                        "target": tgt,
+                        "layer": "service"
+                    })
+                
+                # Remove attack edges
+                for (s, tgt), phase in attack_removes:
+                    edge_remove.append({
+                        "id": f"attack-{edge_id(s, tgt)}",
+                        "source": s,
+                        "target": tgt,
+                        "layer": "attack"
+                    })
+                
+                # Generate info pulses for this timestep
+                pulses = env_behaviour.generate_info_pulses(reg_behaviour, t)
+                
+                # Write enhanced JSONL line per frame
+                frame_data = {
                     "t": t + 1,
-                    "provider_id": prov,
-                    "service_level": rewards[t, prov],
-                    "opinion": opinionvalues[t, prov + 3] if (prov + 3) < opinionvalues.shape[1] else 0,
-                    "reward": r_per_user,
+                    "nodes": nodes_for_frame,
+                    "edgeDeltas": {"add": edge_add, "remove": edge_remove},
+                    "provStats": provider_stats,  # NEW: Provider statistics
+                    "pulses": pulses              # NEW: Information flow pulses
                 }
-                for _ in range(n_here):
-                    jsonl.write(dumps(common | {
-                        "agent_id": agent_id,
-                        "malicious": int(agent_id < nMalAgents),
-                    }) + b"\n")
-                    agent_id = (agent_id + 1) % nAgents
+                
+                # Add nodeDeltas for delta frames (not first frame)
+                if prev_nodes and (node_deltas["add"] or node_deltas["remove"] or node_deltas["update"]):
+                    frame_data["nodeDeltas"] = node_deltas
+                
+                jsonl.write(dumps(frame_data) + b"\n")
+                
+                # Reset accumulators after export
+                service_adds.clear()
+                service_removes.clear()
+                attack_adds.clear()
+                attack_removes.clear()
 
         # --- Attack meta extraction --------------------------------------
         attack_happened = nMalAgents > 0 and np.any(attack_decisions == 1)
@@ -281,15 +523,15 @@ for _run_idx in range(run):
     jsonl.close()          # flush the frame stream first
 
 
-    TEST_FRAMES = FRAMES_JSONL.replace('.jsonl.gz', '_small.jsonl.gz')
-    with gzip.open(FRAMES_JSONL, 'rt') as f_in:
-        with gzip.open(TEST_FRAMES, 'wt') as f_out:
-            for i, line in enumerate(f_in):
-                if i < 10000:  # Only first 10k lines
-                    f_out.write(line)
-                else:
-                    break
-    print(f"Created small test file: {TEST_FRAMES}")
+    # TEST_FRAMES = FRAMES_JSONL.replace('.jsonl.gz', '_small.jsonl.gz')
+    # with gzip.open(FRAMES_JSONL, 'rt') as f_in:
+    #     with gzip.open(TEST_FRAMES, 'wt') as f_out:
+    #         for i, line in enumerate(f_in):
+    #             if i < 10000:  # Only first 10k lines
+    #                 f_out.write(line)
+    #             else:
+    #                 break
+    # print(f"Created small test file: {TEST_FRAMES}")
 
     header_json = {
         "meta": {
@@ -301,7 +543,7 @@ for _run_idx in range(run):
         "summary_csv": os.path.basename(SUMMARY_CSV),
         "frames_gzip": os.path.basename(FRAMES_JSONL),
         "events": events,          # ← now actually persisted
-        "links": [{"source": s, "target": t, "type": typ} for s, t, typ in links]
+        "links": [{"id": edge_id(s, t), "source": s, "target": t, "layer": "info", "phase": "NONE", "dir": "↔", "type": typ} for s, t, typ in links]
     }
     # std-lib json is fine (events are plain ints/strs)
     with open(HEADER_JSON, "w", encoding="utf-8") as fh:

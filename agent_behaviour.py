@@ -49,7 +49,44 @@ class AgentsBehaviour:
         self.network.nodes[agent]["r(a)"][timestep] = reward
         # Update the vector of positive rewards
         self.network.nodes[agent]["n(r)"][action] += reward
+        
+        # NEW: Update endpoint availability and satisfaction tracking
+        self.update_endpoint_availability(agent, action, reward, timestep)
+        self.update_satisfaction(agent, timestep)
+        
         return reward
+    
+    def update_endpoint_availability(self, agent, action, reward, timestep):
+        """
+        Update agent's endpoint availability (ld) based on current reward
+        """
+        # Initialize ld tracking if not exists
+        if "ld" not in self.network.nodes[agent]:
+            self.network.nodes[agent]["ld"] = {}
+        
+        # Store endpoint availability for this timestep
+        self.network.nodes[agent]["ld"][timestep] = reward
+    
+    def update_satisfaction(self, agent, timestep):
+        """
+        Calculate agent satisfaction (sat) based on recent endpoint availability
+        """
+        # Initialize satisfaction tracking if not exists
+        if "sat" not in self.network.nodes[agent]:
+            self.network.nodes[agent]["sat"] = {}
+        
+        # Get recent ld values (last 5 timesteps or available history)
+        ld_values = []
+        for t in range(max(1, timestep - 4), timestep + 1):
+            if "ld" in self.network.nodes[agent] and t in self.network.nodes[agent]["ld"]:
+                ld_values.append(self.network.nodes[agent]["ld"][t])
+        
+        # Calculate satisfaction: 1 if average ld >= 0.8, 0 otherwise
+        if ld_values:
+            avg_ld = sum(ld_values) / len(ld_values)
+            self.network.nodes[agent]["sat"][timestep] = 1 if avg_ld >= 0.8 else 0
+        else:
+            self.network.nodes[agent]["sat"][timestep] = 0
 
     def update_Q(self, agent, action, reward, alpha):
         """
@@ -140,3 +177,61 @@ class AgentsBehaviour:
                     self.network.nodes[agent]["Phi(o)"][opinion[2]] + alpha *\
                     (feedback - self.network.nodes[agent]["Phi(o)"][opinion[2]])
         return self.network.nodes[agent]["Phi(o)"]
+    
+    def update_cyber_detection(self, agent, target_provider, attack_active, theta, timestep):
+        """
+        Update agent's cyber attack detection status
+        
+        agent: agent id
+        target_provider: provider being attacked
+        attack_active: whether cyber attack is currently active
+        theta: detection probability 
+        timestep: current timestep
+        """
+        # Initialize detection tracking if not exists
+        if "detCyber" not in self.network.nodes[agent]:
+            self.network.nodes[agent]["detCyber"] = {}
+        
+        # Default to no detection
+        detected = 0
+        
+        # Check if agent is using the targeted provider and attack is active
+        if (attack_active and 
+            "a" in self.network.nodes[agent] and 
+            timestep < len(self.network.nodes[agent]["a"]) and
+            self.network.nodes[agent]["a"][timestep] == target_provider and
+            "ld" in self.network.nodes[agent] and
+            timestep in self.network.nodes[agent]["ld"] and
+            self.network.nodes[agent]["ld"][timestep] == 0):  # Service is down
+            
+            # Probabilistic detection based on theta
+            if np.random.random() <= theta:
+                detected = 1
+        
+        self.network.nodes[agent]["detCyber"][timestep] = detected
+        return detected
+    
+    def update_misinfo_detection(self, agent, communicated_with_malicious, eta, timestep):
+        """
+        Update agent's misinformation detection status
+        
+        agent: agent id
+        communicated_with_malicious: whether agent communicated with malicious agent
+        eta: detection probability
+        timestep: current timestep
+        """
+        # Initialize detection tracking if not exists
+        if "detMisinfo" not in self.network.nodes[agent]:
+            self.network.nodes[agent]["detMisinfo"] = {}
+        
+        # Default to no detection
+        detected = 0
+        
+        # Check if agent received misinformation and can detect it
+        if communicated_with_malicious:
+            # Probabilistic detection based on eta
+            if np.random.random() <= eta:
+                detected = 1
+        
+        self.network.nodes[agent]["detMisinfo"][timestep] = detected
+        return detected
