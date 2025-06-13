@@ -4,7 +4,7 @@
 """
 MIT License
 
-Copyright (c) 2024 Kart Padur
+Andreas Sjöstedt
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -163,6 +163,7 @@ for _run_idx in range(run):
             # Get attack edges from malicious behavior
             current_attack_edges = set()
             attack_edges_data = mal_behaviour.generate_attack_edges(t)
+            
             for edge_data in attack_edges_data:
                 edge_tuple = (edge_data["source"], edge_data["target"])
                 current_attack_edges.add((edge_tuple, edge_data["phase"]))
@@ -174,6 +175,19 @@ for _run_idx in range(run):
             # Track attack edge changes  
             newly_added_attack = current_attack_edges - prev_attack_edges
             newly_removed_attack = prev_attack_edges - current_attack_edges
+            
+            # DEBUG: Print attack edge generation and deltas
+            if t >= 2900 and t <= 2920:
+                print(f"DEBUG Frame {t}: Generated {len(attack_edges_data)} attack edges")
+                if attack_edges_data:
+                    print(f"  Sample edge: {attack_edges_data[0]}")
+                    print(f"  Malicious agents: {sorted(malagents)}")
+                    print(f"  Attack sources: {sorted(set(edge['source'] for edge in attack_edges_data))}")
+                print(f"  Attack adds: {len(newly_added_attack)}, removes: {len(newly_removed_attack)}")
+                if newly_added_attack:
+                    print(f"  Add sample: {list(newly_added_attack)[0]}")
+                if newly_removed_attack:
+                    print(f"  Remove sample: {list(newly_removed_attack)[0]}")
             
             # Accumulate service edge changes
             for edge in newly_added_service:
@@ -252,7 +266,7 @@ for _run_idx in range(run):
                             "id": str(agent),
                             "prov": provider,
                             "reward": r_per_user,
-                            "mal": int(agent < nMalAgents),
+                            "mal": int(agent in malagents),
                             "opin": opinionvalues[t, provider + 3] if (provider + 3) < opinionvalues.shape[1] else 0,
                             # NEW FIELDS
                             "ld": ld,
@@ -354,7 +368,8 @@ for _run_idx in range(run):
                         "id": f"attack-{edge_id(s, tgt)}",
                         "source": s,
                         "target": tgt,
-                        "layer": "attack"
+                        "layer": "attack",
+                        "phase": phase
                     })
                 
                 # Generate info pulses for this timestep
