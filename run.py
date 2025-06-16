@@ -303,7 +303,7 @@ for _run_idx in range(run):
                             "prov": provider,
                             "reward": r_per_user,
                             "mal": int(agent in malagents),
-                            "opin": opinionvalues[t, provider + 3] if (provider + 3) < opinionvalues.shape[1] else 0,
+                            "opin": opinionvalues[t, provider + nProviders] if (provider + nProviders) < opinionvalues.shape[1] else 0,
                             # NEW FIELDS
                             "ld": ld,
                             "sat": sat,
@@ -545,7 +545,7 @@ for _run_idx in range(run):
             avguse = np.mean(actions[W + 1:, provider]) / nAgents
             denom_total = np.sum(actions[W + 1:, provider])
             avgreward = 0 if denom_total == 0 else np.sum(rewards[W + 1:, provider]) / denom_total
-            posopinion = np.mean(opinionvalues[W + 1:, provider + 3])
+            posopinion = np.mean(opinionvalues[W + 1:, provider + nProviders])
             negopinion = np.mean(opinionvalues[W + 1:, provider])
 
             if attack_happened:
@@ -566,9 +566,9 @@ for _run_idx in range(run):
                 avgrewduring = _mean_safe(rewards[during_sl, provider] / np.where(actions[during_sl, provider] == 0, 1, actions[during_sl, provider]))
                 avgrewafter  = _mean_safe(rewards[after_sl,  provider] / np.where(actions[after_sl,  provider] == 0, 1, actions[after_sl,  provider]))
 
-                posopinionbefore = _mean_safe(opinionvalues[before_sl, provider + 3])
-                posopinionduring = _mean_safe(opinionvalues[during_sl, provider + 3])
-                posopinionafter  = _mean_safe(opinionvalues[after_sl,  provider + 3])
+                posopinionbefore = _mean_safe(opinionvalues[before_sl, provider + nProviders])
+                posopinionduring = _mean_safe(opinionvalues[during_sl, provider + nProviders])
+                posopinionafter  = _mean_safe(opinionvalues[after_sl,  provider + nProviders])
                 negopinionbefore = _mean_safe(opinionvalues[before_sl, provider])
                 negopinionduring = _mean_safe(opinionvalues[during_sl, provider])
                 negopinionafter  = _mean_safe(opinionvalues[after_sl,  provider])
