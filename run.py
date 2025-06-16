@@ -47,6 +47,21 @@ from setup_values import (
     lambda_ as lambda_arr, xi, rho, tau, Upsilon, upsilon_, experiment_id,
 )
 
+# Import simulation bridge for live streaming
+try:
+    import requests
+    LIVE_STREAMING = True
+    # Test if FastAPI server is running
+    try:
+        requests.get("http://localhost:8000/", timeout=1)
+        print("FastAPI server detected - live streaming enabled")
+    except:
+        LIVE_STREAMING = False
+        print("FastAPI server not running - live streaming disabled")
+except ImportError:
+    LIVE_STREAMING = False
+    print("requests not available - live streaming disabled")
+
 # Export every nth timestep
 EXPORT_INTERVAL = 1
 
@@ -78,6 +93,22 @@ HEADER_JSON = FRAMES_JSONL.replace("frames_", "header_").replace(".jsonl.gz", ".
 if save_fig:
     os.makedirs(output_dir, exist_ok=True)
 
+# Start live streaming run if available
+current_run_id = None
+if LIVE_STREAMING:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    import uuid
+    current_run_id = f"exp3_{timestamp}_{uuid.uuid4().hex[:8]}"
+    print(f"Started live run: {current_run_id}")
+    
+    # Register run with FastAPI server
+    try:
+        response = requests.post(f"http://localhost:8000/api/v1/runs/{current_run_id}/register", timeout=5)
+        print(f"Run registration response: {response.status_code}")
+    except Exception as e:
+        print(f"Failed to register run with server: {e}")
+        LIVE_STREAMING = False
+
 # Head‑less backend detection – "Agg", "PDF", etc. never open a window ------
 HEADLESS_BACKENDS = {"agg", "pdf", "svg"}
 SHOW_FIGS = (not save_fig) and matplotlib.get_backend().lower() not in HEADLESS_BACKENDS
@@ -106,6 +137,7 @@ COLUMNS = [
 run = 1  # You can bump this to run the same parameter set multiple times
 
 for _run_idx in range(run):
+    print(f"Starting simulation run {_run_idx + 1}/{run}")
     timer = Timer(); timer.start()
 
     rows:   list[dict] = []       # provider-level summary rows
@@ -152,6 +184,8 @@ for _run_idx in range(run):
         mal_behaviour.attack_methods = attack_methods
         
         for t in range(nTimesteps):
+            if t == 0:
+                print(f"Starting timestep loop, nTimesteps={nTimesteps}")
             # Build current service edges (agent -> provider connections)
             current_service_edges = set()
             for agent in range(nAgents):
@@ -220,6 +254,8 @@ for _run_idx in range(run):
             
             # Export on interval
             if t % EXPORT_INTERVAL == 0:
+                if t <= 5:  # Debug first few timesteps
+                    print(f"Processing timestep {t}, LIVE_STREAMING={LIVE_STREAMING}, run_id={current_run_id}")
                 # Build current node state
                 current_nodes = {}
                 nodes_for_frame = []
@@ -389,6 +425,76 @@ for _run_idx in range(run):
                     frame_data["nodeDeltas"] = node_deltas
                 
                 jsonl.write(dumps(frame_data) + b"\n")
+                
+                # Store step for live stream if available (frontend will request chunks)
+                if LIVE_STREAMING and current_run_id:
+                    # For live streaming, send ALL edges (not deltas)
+                    all_edges = []
+                    
+                    # Add static info edges from social network
+                    for src_node in network.nodes():
+                        for tgt_node in network.neighbors(src_node):
+                            if int(src_node) < int(tgt_node):  # Avoid duplicates
+                                all_edges.append({
+                                    "id": f"{src_node}-{tgt_node}",
+                                    "source": str(src_node),
+                                    "target": str(tgt_node),
+                                    "layer": "info",
+                                    "phase": "NONE",
+                                    "dir": "↔",
+                                    "type": "info"
+                                })
+                    
+                    # Add current service edges
+                    for s, tgt in current_service_edges:
+                        all_edges.append({
+                            "id": edge_id(s, tgt),
+                            "source": s,
+                            "target": tgt,
+                            "layer": "service",
+                            "phase": "NONE",
+                            "dir": "→",
+                            "type": "service"
+                        })
+                    
+                    # Add current attack edges
+                    for (s, tgt), phase in current_attack_edges:
+                        all_edges.append({
+                            "id": f"attack-{edge_id(s, tgt)}",
+                            "source": s,
+                            "target": tgt,
+                            "layer": "attack",
+                            "phase": phase,
+                            "dir": "→",
+                            "type": "attack"
+                        })
+                    
+                    # For live streaming, send ALL nodes and ALL edges
+                    live_frame_data = {
+                        "t": t + 1,
+                        "nodes": list(current_nodes.values()),  # Send ALL nodes
+                        "edges": all_edges,  # Send ALL edges (not deltas)
+                        "provStats": provider_stats,
+                        "pulses": pulses
+                    }
+                    
+                    # Convert numpy types to native Python types for JSON serialization
+                    json_frame_data = json.loads(dumps(live_frame_data))
+                    
+                    try:
+                        # Just add the step - frontend will request it via WebSocket
+                        response = requests.post(
+                            f"http://localhost:8000/api/v1/runs/{current_run_id}/step",
+                            json=json_frame_data,
+                            timeout=0.5
+                        )
+                        if t <= 5:  # Only log first few steps
+                            print(f"Stored step {t}, status: {response.status_code}")
+                    except Exception as e:
+                        if t <= 5:  # Only log first few errors
+                            print(f"Failed to store step {t}: {e}")
+                        # Don't let streaming errors stop the simulation
+                        pass
                 
                 # Reset accumulators after export
                 service_adds.clear()
@@ -638,3 +744,11 @@ for _run_idx in range(run):
           "   ↳ header JSON   → {}"
           .format(_run_idx + 1, run, timer.elapsed,
                   SUMMARY_CSV, FRAMES_JSONL, HEADER_JSON))
+    
+    # End live streaming run if available
+    if LIVE_STREAMING and current_run_id:
+        try:
+            requests.post(f"http://localhost:8000/api/v1/runs/{current_run_id}/end", timeout=5)
+        except Exception as e:
+            print(f"Failed to end run: {e}")
+        print(f"   ↳ live run ID   → {current_run_id}")
