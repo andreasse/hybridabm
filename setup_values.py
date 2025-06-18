@@ -20,9 +20,9 @@ else:
 timestep = 1
 nExperiments = 1
 #nTimesteps = 10000
-nTimesteps = 3000
+nTimesteps = 1000
 #W = 2000
-W = 500
+W = 10
 nAgents = 100
 if cyberattack or misinformation or coordinated_attack:
     nMalAgents = int(0.05*nAgents)
