@@ -20,16 +20,16 @@ else:
 timestep = 1
 nExperiments = 1
 #nTimesteps = 10000
-nTimesteps = 4000
+nTimesteps = 1000
 #W = 2000
 W = 10
-nAgents = 500
+nAgents = 300
 if cyberattack or misinformation or coordinated_attack:
     nMalAgents = int(0.05*nAgents)
 else: # no malicious users are introduced if no attack is selected
     nMalAgents = 0
 regagents = nAgents - nMalAgents
-nProviders = 2
+nProviders = 3
 
 # Parameters (NOTE: some parameters have updated notation added in parentheses)
 alpha = 0.05 # learning rate
