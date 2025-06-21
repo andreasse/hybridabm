@@ -29,10 +29,17 @@ SOFTWARE.
 #  ⚙️  Hybrid‑Article main driver  (stream-friendly, O(1)-RAM rewrite) (full original logic + perf & head‑less fixes)
 # ---------------------------------------------------------------------------
 
-import os, gzip, json, warnings
+import os, gzip, json, warnings, logging
 from datetime import datetime, timezone
 import matplotlib, matplotlib.pyplot as plt
 import numpy as np, pandas as pd, orjson
+
+# Set up debug logging for simulation events
+debug_logger = logging.getLogger('simulation_debug')
+debug_logger.setLevel(logging.DEBUG)
+debug_handler = logging.FileHandler('simulation_debug.log', mode='w')
+debug_handler.setFormatter(logging.Formatter('[%(asctime)s] %(message)s'))
+debug_logger.addHandler(debug_handler)
 
 from timer import Timer
 from experiment import experiment
@@ -48,6 +55,8 @@ from setup_values import (
 )
 
 # Import simulation bridge for live streaming
+import queue
+import threading
 try:
     import requests
     LIVE_STREAMING = True
@@ -55,12 +64,80 @@ try:
     try:
         requests.get("http://localhost:8000/", timeout=1)
         print("FastAPI server detected - live streaming enabled")
+        debug_logger.info("FastAPI server detected - live streaming enabled")
     except:
         LIVE_STREAMING = False
         print("FastAPI server not running - live streaming disabled")
+        debug_logger.warning("FastAPI server not running - live streaming disabled")
 except ImportError:
     LIVE_STREAMING = False
     print("requests not available - live streaming disabled")
+    debug_logger.warning("requests not available - live streaming disabled")
+
+# Import event aggregator (always import at module level for singleton consistency)
+try:
+    from app.application.services.event_aggregator import event_aggregator
+    from app.api.v1.schemas.events import SimulationEvent
+    
+    if LIVE_STREAMING:
+        EVENT_AGGREGATION = True
+        debug_logger.info("Event aggregation enabled successfully")
+        
+        # Create thread-safe event queue and background processor
+        event_queue = queue.Queue()
+        
+        def event_processor():
+            """Background thread to process events without blocking simulation"""
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            debug_logger.info("Event processor thread started")
+            
+            while True:
+                try:
+                    run_id, event = event_queue.get(timeout=1)
+                    if run_id is None:  # Shutdown signal
+                        break
+                    debug_logger.info(f"Event processor: Got event from queue: {event.type} at t={event.t}")
+                    loop.run_until_complete(event_aggregator.add_event(run_id, event))
+                    debug_logger.info(f"Event processor: Event sent to aggregator successfully")
+                    event_queue.task_done()
+                except queue.Empty:
+                    continue
+                except Exception as e:
+                    debug_logger.error(f"Event processor error: {e}")
+            
+            loop.close()
+        
+        # Start background event processor
+        event_thread = threading.Thread(target=event_processor, daemon=True)
+        event_thread.start()
+        
+        def emit_event_async(run_id, event):
+            """Non-blocking event emission"""
+            try:
+                debug_logger.info(f"Emitting event: {event.type} at t={event.t} for run {run_id}")
+                event_queue.put((run_id, event), block=False)
+                debug_logger.debug(f"Event queued successfully: {event}")
+            except queue.Full:
+                debug_logger.error("Event queue full - dropping event")
+    else:
+        EVENT_AGGREGATION = False
+        debug_logger.info("Event aggregation disabled - live streaming not enabled")
+        
+        def emit_event_async(run_id, event):
+            """Dummy function when event aggregation is disabled"""
+            pass
+        
+except ImportError:
+    EVENT_AGGREGATION = False
+    print("Event aggregation not available")
+    debug_logger.warning("Event aggregation not available - import failed")
+    
+    def emit_event_async(run_id, event):
+        """Dummy function when event aggregation is not available"""
+        pass
 
 # Export every nth timestep
 EXPORT_INTERVAL = 1
@@ -183,6 +260,13 @@ for _run_idx in range(run):
         mal_behaviour.targets = targets  
         mal_behaviour.attack_methods = attack_methods
         
+        # Track provider states for transition event detection
+        prev_provider_states = {}  # provider_id -> zd state (0=down, 1=up)
+        provider_down_intervals = {}  # provider_id -> {"start": t, "end": None}
+        
+        # Track attack intervals for range-based events
+        current_attack_interval = None  # {"type": "CYBER", "start": t, "end": None}
+        
         for t in range(nTimesteps):
             if t == 0:
                 print(f"Starting timestep loop, nTimesteps={nTimesteps}")
@@ -255,7 +339,7 @@ for _run_idx in range(run):
             # Export on interval
             if t % EXPORT_INTERVAL == 0:
                 if t <= 5:  # Debug first few timesteps
-                    print(f"Processing timestep {t}, LIVE_STREAMING={LIVE_STREAMING}, run_id={current_run_id}")
+                    debug_logger.info(f"Processing timestep {t}, LIVE_STREAMING={LIVE_STREAMING}, EVENT_AGGREGATION={EVENT_AGGREGATION}, run_id={current_run_id}")
                 # Build current node state
                 current_nodes = {}
                 nodes_for_frame = []
@@ -263,6 +347,68 @@ for _run_idx in range(run):
                 
                 # Simulate detection states and satisfaction for agents
                 attack_info = mal_behaviour.get_active_attack_info(t)
+                
+                # Track attack intervals for range-based events
+                if EVENT_AGGREGATION and current_run_id and t < len(attack_decisions):
+                    typ_map = {0: "CYBER", 1: "MISINFO", 2: "COMBO"}
+                    
+                    if t <= 10 or t % 100 == 0:  # Log early timesteps and every 100th
+                        debug_logger.debug(f"t={t}: attack_decision={attack_decisions[t] if t < len(attack_decisions) else 'N/A'}, current_interval={current_attack_interval}")
+                    
+                    if attack_decisions[t] == 1:  # Attack is active
+                        attack_method = attack_methods[t]
+                        current_attack_type = typ_map[int(attack_method)]
+                        
+                        if current_attack_interval is None:
+                            # Start new attack interval
+                            current_attack_interval = {
+                                "type": current_attack_type,
+                                "start": t + 1,
+                                "end": None
+                            }
+                        elif current_attack_interval["type"] != current_attack_type:
+                            # Attack type changed - end previous interval and start new one
+                            current_attack_interval["end"] = t  # End at previous timestep
+                            duration = current_attack_interval["end"] - current_attack_interval["start"] + 1
+                            
+                            # Emit completed interval
+                            event = SimulationEvent(
+                                t=current_attack_interval["start"],
+                                type=current_attack_interval["type"],
+                                duration=duration
+                            )
+                            if EVENT_AGGREGATION:
+                                emit_event_async(current_run_id, event)
+                            
+                            # Start new interval
+                            current_attack_interval = {
+                                "type": current_attack_type,
+                                "start": t + 1,
+                                "end": None
+                            }
+                    
+                    else:  # No attack active
+                        if current_attack_interval is not None:
+                            # End current attack interval
+                            current_attack_interval["end"] = t  # End at previous timestep
+                            duration = current_attack_interval["end"] - current_attack_interval["start"] + 1
+                            
+                            # Emit completed interval
+                            event = SimulationEvent(
+                                t=current_attack_interval["start"],
+                                type=current_attack_interval["type"],
+                                duration=duration
+                            )
+                            try:
+                                import asyncio
+                                loop = asyncio.new_event_loop()
+                                asyncio.set_event_loop(loop)
+                                loop.run_until_complete(event_aggregator.add_event(current_run_id, event))
+                                loop.close()
+                            except Exception as e:
+                                print(f"Failed to emit {current_attack_interval['type']} event: {e}")
+                            
+                            current_attack_interval = None
                 
                 # Build current agent nodes
                 for agent in range(nAgents):
@@ -323,6 +469,30 @@ for _run_idx in range(run):
                     zd = 0 if (attack_info["active"] and 
                               attack_info["target"] == prov and 
                               attack_info["method"] in [0, 2]) else 1
+                    
+                    # Track provider state transitions for event emission
+                    if EVENT_AGGREGATION and current_run_id:
+                        prev_zd = prev_provider_states.get(prov, 1)  # Default to up
+                        
+                        if prev_zd == 1 and zd == 0:  # Provider goes down
+                            provider_down_intervals[prov] = {"start": t + 1, "end": None}
+                            
+                        elif prev_zd == 0 and zd == 1:  # Provider comes back up
+                            if prov in provider_down_intervals and provider_down_intervals[prov]["end"] is None:
+                                # Complete the interval and emit event
+                                interval = provider_down_intervals[prov]
+                                interval["end"] = t  # End at previous timestep
+                                
+                                event = SimulationEvent(
+                                    t=interval["start"], 
+                                    type="PROVIDER_DOWN",
+                                    provider=prov,
+                                    duration=interval["end"] - interval["start"] + 1
+                                )
+                                if EVENT_AGGREGATION:
+                                    emit_event_async(current_run_id, event)
+                        
+                        prev_provider_states[prov] = zd
                     
                     node_data = {
                         "id": provider_id,
@@ -501,6 +671,34 @@ for _run_idx in range(run):
                 service_removes.clear()
                 attack_adds.clear()
                 attack_removes.clear()
+        
+        # Handle any remaining intervals at end of simulation
+        if EVENT_AGGREGATION and current_run_id:
+            # Complete any ongoing attack interval
+            if current_attack_interval is not None:
+                current_attack_interval["end"] = nTimesteps
+                duration = current_attack_interval["end"] - current_attack_interval["start"] + 1
+                
+                event = SimulationEvent(
+                    t=current_attack_interval["start"],
+                    type=current_attack_interval["type"],
+                    duration=duration
+                )
+                if EVENT_AGGREGATION:
+                    emit_event_async(current_run_id, event)
+            
+            # Complete any ongoing provider down intervals
+            for prov, interval in provider_down_intervals.items():
+                if interval["end"] is None:  # Provider still down at end
+                    interval["end"] = nTimesteps
+                    event = SimulationEvent(
+                        t=interval["start"], 
+                        type="PROVIDER_DOWN",
+                        provider=prov,
+                        duration=interval["end"] - interval["start"] + 1
+                    )
+                    if EVENT_AGGREGATION:
+                        emit_event_async(current_run_id, event)
 
         # --- Attack meta extraction --------------------------------------
         attack_happened = nMalAgents > 0 and np.any(attack_decisions == 1)

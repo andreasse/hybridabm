@@ -66,6 +66,73 @@ python run.py
 - Attack coordination and effectiveness
 - Agent regret and adaptation patterns
 
+## Logging Architecture
+
+### Core Logging Principles
+
+**File-Based Logging Only:**
+- **NEVER use print statements** - Simulation generates hundreds of step requests per second
+- **Use logging.FileHandler exclusively** - Structured log files for debugging complex interactions
+- **Frontend logs** - Available in browser console for WebSocket connection status
+
+### Log File Structure
+
+**Primary Log Files:**
+- **`simulation_debug.log`** - Simulation timesteps, event generation, background event processing
+- **`event_aggregator.log`** - EventAggregator operations, simulation events, WebSocket client management
+- **`websocket_debug.log`** - Dedicated WebSocket connection lifecycle, registration, and errors
+
+### Critical Logging Issue & Resolution
+
+**Problem Discovered**: Logger conflicts between components caused missing debug information
+
+**The Issue**:
+```python
+# EventAggregator creates logger with overwrite mode
+handler = logging.FileHandler('event_aggregator.log', mode='w')
+
+# WebSocket endpoint tried to append to same logger
+handler = logging.FileHandler('event_aggregator.log', mode='a')
+```
+
+**Result**: WebSocket connection logs were being lost or overwritten, making debugging impossible
+
+**Solution Applied**:
+```python
+# Separate loggers with dedicated files
+ws_logger = logging.getLogger('websocket_debug')
+ws_handler = logging.FileHandler('websocket_debug.log', mode='w')
+
+event_logger = logging.getLogger('event_aggregator')
+event_handler = logging.FileHandler('event_aggregator.log', mode='w')
+```
+
+### Logging Best Practices
+
+**When to Create Separate Log Files**:
+- **Different lifecycles** - EventAggregator persists, WebSocket connections are transient
+- **Different components** - Simulation engine vs FastAPI server vs event streaming
+- **High volume vs debugging** - Separate noisy operations from critical debugging info
+- **Mode conflicts** - When components need different file modes (overwrite vs append)
+
+**Logger Configuration Pattern**:
+```python
+# Create dedicated logger
+logger = logging.getLogger('component_name')
+logger.setLevel(logging.DEBUG)
+
+# Clear existing handlers to avoid conflicts
+for handler in logger.handlers[:]:
+    logger.removeHandler(handler)
+
+# Add dedicated file handler
+handler = logging.FileHandler('component_debug.log', mode='w')
+handler.setFormatter(logging.Formatter('[%(asctime)s] %(message)s'))
+logger.addHandler(handler)
+```
+
+**Critical Lesson**: Complex systems with multiple components require **isolated logging channels** to prevent interference and ensure debuggability.
+
 ## Development Workflow
 
 **Simulation Loop Structure:**

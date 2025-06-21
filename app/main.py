@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.v1.endpoints import live_runs
+from app.api.v1.endpoints import live_runs, events
 
 # Create FastAPI instance
 app = FastAPI(
@@ -22,6 +22,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(live_runs.router, prefix="/api/v1")
+app.include_router(events.router, prefix="/api/v1")
 
 @app.get("/")
 async def root():

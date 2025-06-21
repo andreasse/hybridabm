@@ -4,17 +4,19 @@ from pydantic import BaseModel
 
 
 class SimulationEvent(BaseModel):
-    """Individual simulation event."""
-    t: int  # Timestep (1-indexed to match frontend)
+    """Individual simulation event with duration (range-based)."""
+    t: int  # Start timestep (1-indexed to match frontend)
     type: Literal["CYBER", "MISINFO", "COMBO", "PROVIDER_DOWN"]
     provider: Optional[int] = None  # Provider ID for PROVIDER_DOWN events
+    duration: Optional[int] = None  # Duration in timesteps (for range-based events)
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "t": 150,
                 "type": "CYBER",
-                "provider": None
+                "provider": None,
+                "duration": 25
             }
         }
 
@@ -44,8 +46,8 @@ class EventInitMessage(EventStreamMessage):
             "example": {
                 "type": "event_init",
                 "events": [
-                    {"t": 150, "type": "CYBER", "provider": None},
-                    {"t": 250, "type": "PROVIDER_DOWN", "provider": 2}
+                    {"t": 150, "type": "CYBER", "provider": None, "duration": 25},
+                    {"t": 250, "type": "PROVIDER_DOWN", "provider": 2, "duration": 10}
                 ],
                 "provider_down_steps": [250],
                 "summary": {
@@ -71,13 +73,13 @@ class EventUpdateMessage(EventStreamMessage):
             "example": {
                 "type": "event_update",
                 "events": [
-                    {"t": 150, "type": "CYBER", "provider": None},
-                    {"t": 250, "type": "PROVIDER_DOWN", "provider": 2},
-                    {"t": 350, "type": "MISINFO", "provider": None}
+                    {"t": 150, "type": "CYBER", "provider": None, "duration": 25},
+                    {"t": 250, "type": "PROVIDER_DOWN", "provider": 2, "duration": 10},
+                    {"t": 350, "type": "MISINFO", "provider": None, "duration": 30}
                 ],
                 "provider_down_steps": [250],
                 "new_events": [
-                    {"t": 350, "type": "MISINFO", "provider": None}
+                    {"t": 350, "type": "MISINFO", "provider": None, "duration": 30}
                 ],
                 "summary": {
                     "total_cyber": 1,
@@ -94,3 +96,8 @@ class EventErrorMessage(EventStreamMessage):
     type: Literal["event_error"] = "event_error"
     error: str
     code: Optional[str] = None
+
+
+# Union type for all event stream messages
+from typing import Union
+EventStreamMessageType = Union[EventInitMessage, EventUpdateMessage, EventErrorMessage]
