@@ -1,9 +1,21 @@
 """Live run manager for real-time simulation streaming and frame caching."""
 import json
+import orjson
 from typing import Dict, List, Optional, Set
 from dataclasses import dataclass, field
 import asyncio
 from datetime import datetime
+
+# Use same orjson options as run.py for numpy serialization
+ORJSON_OPTS = (
+    orjson.OPT_SERIALIZE_NUMPY
+    | orjson.OPT_NAIVE_UTC
+    | orjson.OPT_NON_STR_KEYS
+)
+
+def dumps(obj):
+    """JSON serialization with numpy support (same as run.py)."""
+    return orjson.dumps(obj, option=ORJSON_OPTS).decode('utf-8')
 
 
 @dataclass
@@ -44,8 +56,8 @@ class LiveRunManager:
             if not run:
                 raise ValueError(f"Run {run_id} not found")
             
-            # Serialize step once and cache it
-            step_json = json.dumps(step_data)
+            # Serialize step once and cache it (using orjson for numpy support)
+            step_json = dumps(step_data)
             run.steps.append(step_json)
             run.current_step += 1
             

@@ -3,12 +3,12 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
 from typing import Optional, Dict, Any
 import asyncio
 import json
-import subprocess
 import uuid
 from datetime import datetime
 from pydantic import BaseModel
 
 from app.application.services.live_run_manager import live_run_manager
+from app.application.services.simulation_service import simulation_service
 
 
 class SimulateResponse(BaseModel):
@@ -21,49 +21,13 @@ router = APIRouter(prefix="/runs", tags=["live-runs"])
 @router.post("/simulate", response_model=SimulateResponse)
 async def start_simulation(params: Dict[str, Any]):
     """Start a new simulation with given parameters."""
-    # For now, ignore params and start run.py - we'll add parameter passing later
     try:
-        # Start the simulation process in the background
-        process = subprocess.Popen(
-            ["python", "run.py"],
-            cwd="/home/andreas/hybrid_article/backend",
-            stdout=None,  # Inherit our stdout
-            stderr=None,  # Inherit our stderr
-            start_new_session=True,
-            text=True
-        )
-        
-        # Read the output to get the actual run ID
-        run_id = None
-        timeout = 10  # 10 second timeout
-        
-        for _ in range(timeout * 10):  # Check every 100ms
-            if process.poll() is not None:
-                # Process finished (probably with error)
-                stdout, stderr = process.communicate()
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Simulation process exited early. Stderr: {stderr}"
-                )
-            
-            # Check if run ID is available in live_run_manager
-            runs = live_run_manager.list_runs()
-            if runs:
-                # Get the most recent run
-                latest_run = max(runs, key=lambda x: x.get('start_time', ''))
-                run_id = latest_run['run_id']
-                break
-                
-            await asyncio.sleep(0.1)  # Wait 100ms
-        
-        if not run_id:
-            # Fallback: generate placeholder run ID
-            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-            run_id = f"exp3_{timestamp}_{uuid.uuid4().hex[:8]}"
+        # Start simulation in-process using SimulationService
+        run_id = await simulation_service.start_simulation(params)
         
         return SimulateResponse(
             runId=run_id,
-            message=f"Simulation started with process ID {process.pid}"
+            message=f"Simulation started in-process"
         )
         
     except Exception as e:
