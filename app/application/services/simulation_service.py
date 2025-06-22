@@ -1,6 +1,7 @@
 """Service for running simulations in-process within FastAPI."""
 import asyncio
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Union
+import concurrent.futures
 from datetime import datetime
 import uuid
 import logging
@@ -25,25 +26,37 @@ class SimulationService:
     def __init__(self):
         self.event_aggregator = event_aggregator
         self.live_run_manager = live_run_manager
-        self.active_simulations: Dict[str, asyncio.Task] = {}
+        self.active_simulations: Dict[str, Union[asyncio.Task, concurrent.futures.Future]] = {}
     
     async def start_simulation(self, params: Optional[Dict[str, Any]] = None) -> str:
-        """Start a new simulation run in background."""
+        """Start a new simulation run in background thread to avoid blocking event loop."""
         # Generate run_id matching existing format
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         run_id = f"exp3_{timestamp}_{uuid.uuid4().hex[:8]}"
         
-        logger.info(f"Starting simulation {run_id} in-process")
+        logger.info(f"Starting simulation {run_id} in background thread")
         
         # Register with LiveRunManager
         await self.live_run_manager.create_run(run_id)
         
-        # Start simulation in background task
-        task = asyncio.create_task(self._run_simulation(run_id, params))
-        self.active_simulations[run_id] = task
+        # Run simulation in thread pool to avoid blocking the event loop
+        loop = asyncio.get_event_loop()
         
-        # Clean up when done
-        task.add_done_callback(lambda t: self.active_simulations.pop(run_id, None))
+        # Create a new event loop for the thread
+        def run_in_thread():
+            new_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(new_loop)
+            try:
+                new_loop.run_until_complete(self._run_simulation(run_id, params))
+            finally:
+                new_loop.close()
+        
+        # Execute in thread pool
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = loop.run_in_executor(executor, run_in_thread)
+        
+        # Store the future
+        self.active_simulations[run_id] = future
         
         return run_id
     
@@ -255,6 +268,17 @@ class SimulationService:
             provider_down_intervals = {}
             current_attack_interval = None
             
+            # Edge tracking (EXACT same as run.py lines 235-242)
+            prev_service_edges = set()
+            prev_attack_edges = set()
+            service_adds = set()
+            service_removes = set()
+            attack_adds = set()
+            attack_removes = set()
+            
+            # Node delta tracking (EXACT same as run.py line 243)
+            prev_nodes = {}
+            
             def edge_id(src, tgt): 
                 return f"{src}-{tgt}"
             
@@ -389,11 +413,11 @@ class SimulationService:
                     # Generate pulses
                     pulses = behaviours['env'].generate_info_pulses(behaviours['reg'], t)
                     
-                    # Create frame data
+                    # Create frame data in EXACT same format as run.py (live streaming version)
                     frame_data = {
                         "t": t + 1,
-                        "nodes": list(current_nodes.values()),
-                        "edges": all_edges,
+                        "nodes": list(current_nodes.values()),  # Send ALL nodes for live streaming
+                        "edges": all_edges,  # Send ALL edges for live streaming
                         "provStats": provider_stats,
                         "pulses": pulses
                     }
@@ -403,9 +427,8 @@ class SimulationService:
                     if t <= 5 or t % 100 == 0:
                         logger.info(f"Completed timestep {t}")
                 
-                # Yield control periodically
-                if t % 10 == 0:
-                    await asyncio.sleep(0)
+                # Yield control every timestep to prevent blocking FastAPI
+                await asyncio.sleep(0)
             
             # Handle final intervals
             if current_attack_interval is not None:

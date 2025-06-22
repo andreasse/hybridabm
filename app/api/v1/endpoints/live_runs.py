@@ -86,11 +86,14 @@ async def websocket_endpoint(websocket: WebSocket, run_id: str):
             """Handle live step notifications from simulation"""
             while True:
                 try:
-                    notification_json = await queue.get()
+                    notification_json = await asyncio.wait_for(queue.get(), timeout=1.0)
                     # Forward the notification directly (it's already formatted)
                     await websocket.send_text(notification_json)
+                except asyncio.TimeoutError:
+                    # No notification, continue (allows periodic checks)
+                    await asyncio.sleep(0.1)
                 except Exception as e:
-                    print(f"Error handling live notification: {e}")
+                    # Log error without blocking
                     break
         
         async def handle_chunk_requests():
@@ -130,11 +133,19 @@ async def websocket_endpoint(websocket: WebSocket, run_id: str):
                     print(f"Error handling chunk request: {e}")
                     break
         
-        # Run both handlers concurrently
-        await asyncio.gather(
-            handle_live_updates(),
-            handle_chunk_requests()
+        # Create tasks for concurrent execution
+        live_task = asyncio.create_task(handle_live_updates())
+        chunk_task = asyncio.create_task(handle_chunk_requests())
+        
+        # Wait for either task to complete (which means disconnection)
+        done, pending = await asyncio.wait(
+            [live_task, chunk_task],
+            return_when=asyncio.FIRST_COMPLETED
         )
+        
+        # Cancel the other task
+        for task in pending:
+            task.cancel()
             
     except WebSocketDisconnect:
         # Client disconnected normally
