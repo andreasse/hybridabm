@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 # ── pool / manager – built lazily ─────────────────────────────────────────
+# Workers must **ignore SIGINT** so the parent alone handles Ctrl-C.
+def _worker_ignore_sigint() -> None:          # moved to module scope → picklable
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
 _EXECUTOR: Optional[ProcessPoolExecutor] = None
 _MANAGER:  Optional[SyncManager] = None
 
@@ -32,14 +36,11 @@ def init_mp() -> None:
     if _EXECUTOR is not None:          # already initialised
         return
 
-    def _ignore_sigint() -> None:      # workers ignore Ctrl-C
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-
-    ctx = multiprocessing.get_context("fork")   # 'fork' ok on Linux
+    ctx = multiprocessing.get_context("spawn")
     _EXECUTOR = ProcessPoolExecutor(
         max_workers=2,
         mp_context=ctx,
-        initializer=_ignore_sigint,
+        initializer=_worker_ignore_sigint,   # ← now safe to pickle
     )
     _MANAGER = ctx.Manager()
 
@@ -52,6 +53,8 @@ class SimulationService:
         self.live_run_manager = live_run_manager
         self.active_simulations: Dict[str, Dict[str, Any]] = {}
         self.result_queues: Dict[str, Any] = {}
+        # keep an explicit handle to every consumer Task we spawn
+        self._consumers: set[asyncio.Task] = set()
     
     async def start_simulation(self, params: Optional[Dict[str, Any]] = None) -> str:
         """Start a new simulation run in separate process to avoid blocking event loop."""
@@ -86,6 +89,8 @@ class SimulationService:
         consumer_task = asyncio.create_task(
             self._consume_simulation_results(run_id, result_queue)
         )
+        # remember it
+        self._consumers.add(consumer_task)
         
         # Store both future and consumer task
         self.active_simulations[run_id] = {
@@ -147,7 +152,9 @@ class SimulationService:
             # Clean up
             self.result_queues.pop(run_id, None)
             self.active_simulations.pop(run_id, None)
-            # NOTE: don't kill the Manager here – do it once in app shutdown
+            # remove finished consumer from the registry
+            self._consumers.discard(asyncio.current_task())
+            # NOTE: Manager is shut down once, in app-shutdown
     
     def get_status(self, run_id: str) -> Dict[str, Any]:
         """Get the status of a simulation run."""
@@ -180,6 +187,26 @@ class SimulationService:
             pass
         
         return True
+
+    async def shutdown(self) -> None:
+        """
+        Cancel **all** in-flight simulations/consumer tasks so that
+        Uvicorn's shutdown phase doesn't wait forever.
+        """
+        # 1) cancel futures still executing in the pool
+        for info in self.active_simulations.values():
+            info["future"].cancel()
+        
+        # 2) cancel **every** consumer coroutine we recorded
+        for task in list(self._consumers):
+            task.cancel()
+
+        # 3) wait (briefly) until they acknowledge cancellation
+        await asyncio.gather(*self._consumers, return_exceptions=True)
+
+        self._consumers.clear()
+        self.active_simulations.clear()
+        self.result_queues.clear()
 
 
 # Pure synchronous function to run in separate process

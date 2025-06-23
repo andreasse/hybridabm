@@ -33,8 +33,14 @@ async def _startup_mp():
 @app.on_event("shutdown")
 async def _close_mp_manager():
     """Tear down the multiprocessing machinery cleanly."""
+    # 0) stop any simulations that are still streaming
+    await _ss.simulation_service.shutdown()
+
+    # 1) kill the worker pool (now idle) fast
     if _ss._EXECUTOR:
         _ss._EXECUTOR.shutdown(wait=False, cancel_futures=True)
+
+    # 2) close the Manager's listener socket
     if _ss._MANAGER:
         _ss._MANAGER.shutdown()
 
