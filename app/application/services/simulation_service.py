@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirna
 from app.application.services.event_aggregator import event_aggregator
 from app.application.services.live_run_manager import live_run_manager
 from app.api.v1.schemas.events import SimulationEvent
+from app.core.parameter_service import ParameterService, SimulationConfig
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -223,14 +224,29 @@ def _run_simulation_process(run_id: str, params: Optional[Dict[str, Any]], resul
         sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
         
         from timer import Timer
-        import setup_values as sv
         from environment import Environment
         from environment_behaviour import EnvironmentBehaviour
         from agent_behaviour import AgentsBehaviour
         from maliciousagent_behaviour import MaliciousAgentsBehaviour
         from serviceprovider_behaviour import ServiceProvidersBehaviour
+        from app.core.parameter_service import ParameterService, SimulationConfig
         
         result_queue.put({'type': 'log', 'message': f'Starting simulation with PID {os.getpid()}'})
+        
+        # Parse parameters
+        config = ParameterService.parse_parameters(params)
+        
+        # Validate configuration
+        errors = ParameterService.validate_config(config)
+        if errors:
+            error_msg = "Invalid configuration: " + "; ".join(errors)
+            result_queue.put({'type': 'log', 'message': error_msg})
+            raise ValueError(error_msg)
+        
+        # Extract scenario flags for compatibility
+        cyber_attack_enabled = "cyberAttack" in config.scenarios
+        misinformation_enabled = "misinformation" in config.scenarios
+        coordinated_attack_enabled = "coordinatedAttack" in config.scenarios
         
         timer = Timer()
         timer.start()
@@ -239,41 +255,60 @@ def _run_simulation_process(run_id: str, params: Optional[Dict[str, Any]], resul
         result_queue.put({'type': 'log', 'message': 'Running experiment phase...'})
         
         # Create environment and network
-        env = Environment(sv.nAgents, sv.nMalAgents, sv.nProviders, sv.nTimesteps)
-        network, neighbours = env.form_network(sv.kappa, sv.rho)
-        cyber_matrix = np.full((sv.nTimesteps, sv.nAgents), -1, dtype=int)
+        env = Environment(config.num_agents, config.num_malicious_agents, config.num_providers, config.num_timesteps)
+        network, neighbours = env.form_network(config.num_neighbours, config.rewiring_probability)
+        cyber_matrix = np.full((config.num_timesteps, config.num_agents), -1, dtype=int)
         agents, regagents, malagents = env.create_agents()
         providers = env.create_providers()
         env.create_attributes()
         
+        # Get provider reliability arrays
+        endpoint_failure_rates = []
+        endpoint_recovery_rates = []
+        core_failure_rates = []
+        core_recovery_rates = []
+        
+        for i in range(config.num_providers):
+            provider_params = ParameterService.get_provider_params(config, i)
+            endpoint_failure_rates.append(provider_params["endpoint_failure_rate"])
+            endpoint_recovery_rates.append(provider_params["endpoint_recovery_rate"])
+            core_failure_rates.append(provider_params["core_failure_rate"])
+            core_recovery_rates.append(provider_params["core_recovery_rate"])
+        
         # Create behavior objects
-        env_behaviour = EnvironmentBehaviour(agents, regagents, malagents, providers, neighbours, network, sv.nTimesteps)
+        env_behaviour = EnvironmentBehaviour(agents, regagents, malagents, providers, neighbours, network, config.num_timesteps)
         reg_behaviour = AgentsBehaviour(network, providers)
-        serv_behaviour = ServiceProvidersBehaviour(providers, agents, sv.Upsilon, sv.upsilon_, sv.Lambda, sv.lambda_, sv.nTimesteps)
-        mal_behaviour = MaliciousAgentsBehaviour(network, malagents, providers, sv.xi, sv.nTimesteps)
+        serv_behaviour = ServiceProvidersBehaviour(providers, agents, core_failure_rates, core_recovery_rates, 
+                                                   endpoint_failure_rates, endpoint_recovery_rates, config.num_timesteps)
+        mal_behaviour = MaliciousAgentsBehaviour(network, malagents, providers, config.initial_q_value, config.num_timesteps)
         
         # Data collection arrays
-        countUsers = np.zeros((sv.nTimesteps+1, sv.nProviders), dtype=int)
-        countRewards = np.zeros((sv.nTimesteps+1, sv.nProviders), dtype=int)
-        opinionValues = np.zeros((sv.nTimesteps+1, len(agents), 2*len(providers)), dtype=float)
+        countUsers = np.zeros((config.num_timesteps+1, config.num_providers), dtype=int)
+        countRewards = np.zeros((config.num_timesteps+1, config.num_providers), dtype=int)
+        opinionValues = np.zeros((config.num_timesteps+1, len(agents), 2*len(providers)), dtype=float)
         actions, rewards, regrets, opinionvalues = [], [], [], []
         attack_decisions, targets, attack_methods = [], [], []
         attack_rewards, detection_rewards = [], []
         
-        timestep = sv.timestep
+        timestep = config.timestep
         
         # Main experiment loop
-        for step in range(sv.nTimesteps):
+        for step in range(config.num_timesteps):
             # Environment
             env_behaviour.show_state(timestep)
-            attack_reward, detection_reward = env_behaviour.calculate_malreward(sv.eta, sv.theta, timestep)
+            attack_reward, detection_reward = env_behaviour.calculate_malreward(config.misinfo_detection_rate, 
+                                                                               config.cyber_detection_rate, timestep)
             
             # Malicious agents
             mal_behaviour.receive_malreward(attack_reward, detection_reward, timestep)
-            mal_behaviour.update_malQ(sv.alpha, sv.W, timestep)
-            attack_decision = mal_behaviour.select_action(sv.cyberattack, sv.misinformation, sv.coordinated_attack, sv.W, timestep)
-            target = mal_behaviour.select_target(attack_decision, sv.cyberattack, sv.misinformation, sv.W, timestep)
-            attack_method = mal_behaviour.select_attack_method(attack_decision, target, sv.epsilon, sv.cyberattack, sv.misinformation, sv.coordinated_attack, sv.W, timestep)
+            mal_behaviour.update_malQ(config.learning_rate, config.window_size, timestep)
+            attack_decision = mal_behaviour.select_action(cyber_attack_enabled, misinformation_enabled, 
+                                                         coordinated_attack_enabled, config.window_size, timestep)
+            target = mal_behaviour.select_target(attack_decision, cyber_attack_enabled, misinformation_enabled, 
+                                               config.window_size, timestep)
+            attack_method = mal_behaviour.select_attack_method(attack_decision, target, config.exploration_rate,
+                                                              cyber_attack_enabled, misinformation_enabled, 
+                                                              coordinated_attack_enabled, config.window_size, timestep)
             
             # Service providers
             for provider in providers:
@@ -282,14 +317,14 @@ def _run_simulation_process(run_id: str, params: Optional[Dict[str, Any]], resul
             
             # All agents   
             for agent in agents:
-                action = reg_behaviour.select_action(agent, sv.epsilon, sv.tau, timestep)
+                action = reg_behaviour.select_action(agent, config.exploration_rate, config.experience_weight, timestep)
                 cyber_matrix[step, agent] = action
                 reward = reg_behaviour.receive_reward(agent, action, endpoint, timestep)
-                reg_behaviour.update_Q(agent, action, reward, sv.alpha)
-                opinion = reg_behaviour.express_opinion(agent, sv.epsilon, timestep)
+                reg_behaviour.update_Q(agent, action, reward, config.learning_rate)
+                opinion = reg_behaviour.express_opinion(agent, config.exploration_rate, timestep)
                 neighbour = reg_behaviour.find_neighbour(agent, timestep)
-                feedback = reg_behaviour.ask_info(neighbour, malagents, mal_behaviour, opinion, sv.delta, attack_decision, attack_method)
-                opinion_values = reg_behaviour.update_opinion_value(agent, opinion, feedback, sv.alpha)
+                feedback = reg_behaviour.ask_info(neighbour, malagents, mal_behaviour, opinion, config.satisfaction_threshold, attack_decision, attack_method)
+                opinion_values = reg_behaviour.update_opinion_value(agent, opinion, feedback, config.learning_rate)
                 
                 countUsers[timestep, action] += 1
                 countRewards[timestep, action] += reward
@@ -334,10 +369,10 @@ def _run_simulation_process(run_id: str, params: Optional[Dict[str, Any]], resul
         typ_map = {0: "CYBER", 1: "MISINFO", 2: "COMBO"}
 
         # ─── provider-down tracking state ─────────────────────────
-        prev_zd = {p: 1 for p in range(sv.nProviders)}
+        prev_zd = {p: 1 for p in range(config.num_providers)}
         down_intervals = {}
         
-        for t in range(sv.nTimesteps):
+        for t in range(config.num_timesteps):
             # Process attack intervals
             if t < len(attack_decisions) and attack_decisions[t] == 1:
                 attack_method = attack_methods[t]
@@ -380,7 +415,7 @@ def _run_simulation_process(run_id: str, params: Optional[Dict[str, Any]], resul
             if t % 1 == 0:  # Every timestep
                 # Build service edges
                 current_service_edges = set()
-                for agent in range(sv.nAgents):
+                for agent in range(config.num_agents):
                     provider = cyber_matrix[t, agent]
                     if provider != -1:
                         edge = (str(agent), f"P-{provider}")
@@ -438,7 +473,7 @@ def _run_simulation_process(run_id: str, params: Optional[Dict[str, Any]], resul
                 current_nodes = {}
                 
                 # Agent nodes
-                for agent in range(sv.nAgents):
+                for agent in range(config.num_agents):
                     provider = cyber_matrix[t, agent]
                     if provider != -1:
                         n_here = int(actions[t, provider])
@@ -451,7 +486,7 @@ def _run_simulation_process(run_id: str, params: Optional[Dict[str, Any]], resul
                         sat = 1 if ld >= 0.8 else 0
                         det_cyber = 1 if (attack_info.get("active") and attack_info.get("target") == provider and 
                                         attack_info.get("method") in [0, 2] and ld == 0 and 
-                                        np.random.random() <= sv.theta) else 0
+                                        np.random.random() <= config.cyber_detection_rate) else 0
                         det_misinfo = 0
                         
                         current_nodes[str(agent)] = {
@@ -459,7 +494,7 @@ def _run_simulation_process(run_id: str, params: Optional[Dict[str, Any]], resul
                             "prov": provider,
                             "reward": r_per_user,
                             "mal": int(agent in malagents),
-                            "opin": opinionvalues[t, provider + sv.nProviders] if (provider + sv.nProviders) < opinionvalues.shape[1] else 0,
+                            "opin": opinionvalues[t, provider + config.num_providers] if (provider + config.num_providers) < opinionvalues.shape[1] else 0,
                             "ld": ld,
                             "sat": sat,
                             "detCyber": det_cyber,
@@ -472,7 +507,7 @@ def _run_simulation_process(run_id: str, params: Optional[Dict[str, Any]], resul
 
                 # -- compare zd and raise events
                 zd_now = {}
-                for prov in range(sv.nProviders):
+                for prov in range(config.num_providers):
                     zd = 0 if (attack_info.get("active")
                                and attack_info.get("target") == prov
                                and attack_info.get("method") in (0, 2)) else 1
@@ -497,7 +532,7 @@ def _run_simulation_process(run_id: str, params: Optional[Dict[str, Any]], resul
                             })
                     prev_zd[prov] = zd
                 
-                for prov in range(sv.nProviders):
+                for prov in range(config.num_providers):
                     provider_id = f"P-{prov}"
                     zd = zd_now[prov]  # Re-use the already computed value
                     
@@ -530,7 +565,7 @@ def _run_simulation_process(run_id: str, params: Optional[Dict[str, Any]], resul
         
         # Handle final attack interval
         if current_attack_interval is not None:
-            current_attack_interval["end"] = sv.nTimesteps
+            current_attack_interval["end"] = config.num_timesteps
             duration = current_attack_interval["end"] - current_attack_interval["start"] + 1
             event_data = {
                 't': current_attack_interval["start"],
@@ -542,7 +577,7 @@ def _run_simulation_process(run_id: str, params: Optional[Dict[str, Any]], resul
         # Close any provider-down intervals that never came back up
         for prov, interval in down_intervals.items():
             if interval["end"] is None:
-                interval["end"] = sv.nTimesteps
+                interval["end"] = config.num_timesteps
                 result_queue.put({
                     "type": "event",
                     "data": {

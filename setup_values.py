@@ -23,7 +23,7 @@ nExperiments = 1
 nTimesteps = 3000
 #W = 2000
 W = 10
-nAgents = 50
+nAgents = 248
 if cyberattack or misinformation or coordinated_attack:
     nMalAgents = int(0.05*nAgents)
 else: # no malicious users are introduced if no attack is selected

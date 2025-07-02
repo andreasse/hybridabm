@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from app.application.services.live_run_manager import live_run_manager
 from app.application.services.simulation_service import simulation_service
+from app.core.schema_validator import simulation_validator
 
 
 class SimulateResponse(BaseModel):
@@ -21,6 +22,17 @@ router = APIRouter(prefix="/runs", tags=["live-runs"])
 @router.post("/simulate", response_model=SimulateResponse)
 async def start_simulation(params: Dict[str, Any]):
     """Start a new simulation with given parameters."""
+    # Validate against JSON Schema
+    validation_errors = simulation_validator.validate(params)
+    if validation_errors:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Parameter validation failed",
+                "errors": validation_errors
+            }
+        )
+    
     try:
         # Start simulation in-process using SimulationService
         run_id = await simulation_service.start_simulation(params)
@@ -30,6 +42,12 @@ async def start_simulation(params: Dict[str, Any]):
             message=f"Simulation started in-process"
         )
         
+    except ValueError as e:
+        # Handle configuration validation errors from ParameterService
+        raise HTTPException(
+            status_code=400,
+            detail=f"Configuration error: {str(e)}"
+        )
     except Exception as e:
         raise HTTPException(
             status_code=500,
